@@ -1,0 +1,26 @@
+# NOTE FOR THE DEMO: in the real Tessera repo, .env is ignored here and never
+# committed. This demo repo deliberately ships a *synthetic* .env so the
+# secrets guardrail has a realistic target. See .env for the disclaimer.
+#
+# Worth saying out loud during the demo: .gitignore and the guardrail cover
+# different threats. .gitignore stops a commit. It does not stop an agent from
+# reading secrets into its context, rewriting them, or copying them somewhere
+# that *is* tracked. The hook covers those.
+
+.env.local
+.env.*.local
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.ipynb_checkpoints/
+ml/artifacts/
+*.joblib
+.DS_Store
+
+# Ops console runtime state (audit trail, run recordings, local PRs) and
+# frontend build output. Nothing under .tessera/ is a source of truth.
+.tessera/
+web/node_modules/
+web/dist/
+fairness.md
