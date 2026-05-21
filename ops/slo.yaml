@@ -1,0 +1,48 @@
+# Tessera service level objectives.
+#
+# The authorization path is the one that matters: when it degrades, cardholders
+# are standing at a terminal watching a card get declined.
+
+service_level_objectives:
+  - name: payments.authorization.success_rate
+    description: Fraction of authorization attempts that receive a decision
+    target: 0.995
+    window: 28d
+    error_budget_minutes: 201
+    owner: payments-platform
+    paging: true
+
+  - name: payments.authorization.latency
+    description: p99 end-to-end authorization latency
+    target_seconds: 1.0
+    window: 28d
+    owner: payments-platform
+    paging: true
+
+  - name: risk_gateway.fraud_model.p99_latency
+    description: p99 latency of the fraud model call on the auth path
+    target_seconds: 1.0
+    window: 7d
+    owner: risk-platform
+    paging: true
+    notes: >
+      This call is synchronous and blocking. The API edge gives the whole
+      authorization an 8.5s budget, so a p99 that sits at 8.5s does not mean
+      "slow" -- it means callers are exhausting the budget and giving up.
+
+  - name: ledger.balance_integrity
+    description: The book nets to zero at every close
+    target: 1.0
+    window: 1d
+    owner: ledger
+    paging: true
+    notes: A break here is a financial control failure, not a latency problem.
+
+dependencies:
+  fraud-model:
+    criticality: tier-1
+    failure_mode: fail-closed
+    capacity_rps: 155
+    notes: >
+      Capacity was provisioned against observed steady-state demand with
+      headroom. Last reviewed 2026-02; authorization volume has grown since.
