@@ -1,0 +1,94 @@
+name: Claude model investigation
+
+# The data scientist's counterpart to claude-incident-fix.yml.
+#
+#   curl -X POST https://api.github.com/repos/<org>/tessera-platform/dispatches \
+#     -H "Authorization: Bearer $TOKEN" \
+#     -d '{"event_type":"model_validation","client_payload":{"model":"fraud-v3-candidate"}}'
+#
+# What this job may do: read the repo, run the notebook, run tests, open a pull
+# request. What it may not do: promote a model, push to main, deploy, touch
+# secrets, call production. Promotion stays a human decision with MRM in it.
+#
+# This file is also the console's source of truth for the two prompts shown on
+# the model registry page: services/console/runner.py parses them out at run
+# time, so what a presenter types and what CI runs are the same text. Keep the
+# `## 1.` / `## 2.` headings -- that is where the split happens.
+#
+# `NotebookEdit` is in the allowlist deliberately. Headless, a tool that is not
+# listed is denied automatically, and without it the notebook beat is silent.
+on:
+  repository_dispatch:
+    types: [model_validation]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Registry candidate (e.g. fraud-v3-candidate)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  investigate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODEL: ${{ github.event.client_payload.model || inputs.model }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: Confirm the shadow report exists
+        run: |
+          test -f "ml/registry/shadow/${MODEL}.json" \
+            || { echo "::error::no shadow report for ${MODEL}"; exit 1; }
+
+      - name: Investigate, productionize, and open a PR
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are running unattended, as the data scientist who owns this
+            model. Two things follow from that:
+
+            1. Your output is a pull request for a human to review. You do not
+               promote the candidate, you do not deploy, and you do not push to
+               main.
+            2. If the evidence does not support a confident conclusion, say so
+               in the PR and stop. "Here is what I ruled out" is useful. A
+               confident wrong answer about why a model looked good is not.
+
+            Work on a branch named ml/<ticket>-<short-slug>, where <ticket> is
+            the `ticket` field of this candidate's entry in
+            ml/registry/models.json.
+
+            ## 1. Investigate
+
+            Open ml/notebooks/03_v3_shadow_investigation.ipynb. The shadow report in ml/registry/shadow/${{ env.MODEL }}.json says ${{ env.MODEL }} scored 0.906 AUC offline but 0.699 in shadow, below the champion. Investigate in the notebook: reproduce the offline number from notebook 01, then explain the gap with numbers. Add your analysis as new cells and execute the notebook in place with nbconvert so the outputs show in JupyterLab.
+
+            ## 2. Productionize
+
+            Productionize the finding. Add ml/features/aggregates.py with a point-in-time card_chargeback_rate(df, as_of) that only counts chargebacks filed before each transaction, and implement the four gates model-validation.yml already specifies under ml/validation/ with exactly those CLI flags. Keep the notebook's full-data definition as a negative fixture in ml/validation/tests/ so Gate 1 provably fails on it. Add the model card with the model-card skill. Run uv run pytest ml/ before you finish.
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Skill,Task,Read,Grep,Glob,Edit,Write,NotebookEdit,Bash(uv run:*),Bash(git:*),Bash(gh pr create:*)"
+
+      # The guardrails are not optional just because no one is watching.
+      - name: Guardrails still hold
+        if: always()
+        run: |
+          python3 .claude/hooks/protect_secrets.py --selftest
+          python3 .claude/hooks/pii_scan.py --selftest
+          if ! git diff --quiet origin/main -- .env .claude/hooks/ 2>/dev/null; then
+            echo "::error::run modified a protected path"
+            exit 1
+          fi

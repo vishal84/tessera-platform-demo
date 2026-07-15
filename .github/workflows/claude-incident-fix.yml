@@ -1,0 +1,85 @@
+name: Claude incident triage
+
+# Fired by the alerting stack. PagerDuty / Datadog webhook -> repository_dispatch.
+#
+#   curl -X POST https://api.github.com/repos/<org>/tessera-platform/dispatches \
+#     -H "Authorization: Bearer $TOKEN" \
+#     -d '{"event_type":"incident","client_payload":{"incident_id":"INC-4412"}}'
+#
+# What this job may do: read the repo, run tests, open a pull request.
+# What it may not do: push to main, deploy, touch secrets, call production.
+#
+# `Skill` is in the allowlist because /triage-incident is a project command;
+# headless, Claude invokes it through the Skill tool, and a tool that is not
+# listed is denied automatically -- there is nobody to answer a prompt.
+on:
+  repository_dispatch:
+    types: [incident]
+  workflow_dispatch:
+    inputs:
+      incident_id:
+        description: Incident ID (e.g. INC-4412)
+        required: true
+        type: string
+
+permissions:
+  # Enough to push a branch. Protect main on the remote so that "does not push
+  # to main" is structural rather than instructed -- see demo/DEMO_RUNBOOK.md
+  # section 1.6, which also covers what is true when your plan will not allow it.
+  contents: write
+  pull-requests: write
+  issues: write
+  # claude-code-action exchanges a GitHub OIDC token for the credentials it
+  # posts with; required regardless of the LLM credential configured below.
+  id-token: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      INCIDENT_ID: ${{ github.event.client_payload.incident_id || inputs.incident_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: Confirm the evidence bundle exists
+        run: |
+          test -d "ops/incidents/${INCIDENT_ID}" \
+            || { echo "::error::no evidence bundle for ${INCIDENT_ID}"; exit 1; }
+
+      - name: Triage, fix, and open a PR
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run /triage-incident ${{ env.INCIDENT_ID }}
+
+            You are running unattended. Two things follow from that:
+
+            1. Your output is a pull request for a human to review. You do not
+               merge, you do not deploy, and you do not push to main.
+            2. If the evidence does not support a confident root cause, say so
+               in the PR and stop. A PR that says "here is what I ruled out and
+               here is what I could not determine" is useful. A confident wrong
+               fix at 3am is not.
+
+            Include the regression test. Verify it fails without your fix.
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Skill,Task,Read,Grep,Glob,Edit,Write,Bash(uv run:*),Bash(git:*),Bash(gh pr create:*)"
+
+      # The guardrails are not optional just because no one is watching.
+      - name: Guardrails still hold
+        if: always()
+        run: |
+          python3 .claude/hooks/protect_secrets.py --selftest
+          python3 .claude/hooks/pii_scan.py --selftest
+          if ! git diff --quiet origin/main -- .env .claude/hooks/ 2>/dev/null; then
+            echo "::error::run modified a protected path"
+            exit 1
+          fi

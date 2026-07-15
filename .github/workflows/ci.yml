@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only. This workflow checks; it never writes.
+permissions:
+  contents: read
+
+jobs:
+  guardrails:
+    name: Security guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The same hooks that run in an interactive Claude Code session run here.
+      # That symmetry is the point: a guardrail that only applies when a human
+      # is watching is not a guardrail.
+      - name: Secrets guardrail selftest
+        run: python3 .claude/hooks/protect_secrets.py --selftest
+
+      - name: Cardholder-data scanner selftest
+        run: python3 .claude/hooks/pii_scan.py --selftest
+
+      - name: No cardholder data in the diff
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref || 'main' }}" --depth=1 || true
+          FILES=$(git diff --name-only "origin/${{ github.base_ref || 'main' }}"...HEAD \
+                  -- '*.py' '*.ipynb' '*.sql' '*.yaml' '*.yml' '*.md' || true)
+          FAILED=0
+          for f in $FILES; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY' || FAILED=1
+          import sys, pathlib
+          sys.path.insert(0, ".claude/hooks")
+          from pii_scan import scan
+          p = sys.argv[1]
+          findings = scan(pathlib.Path(p).read_text(errors="ignore"), p)
+          if findings:
+              print(f"::error file={p}::cardholder data detected")
+              for f in findings:
+                  print(f"  - {f}")
+              sys.exit(1)
+          PY
+          done
+          exit $FAILED
+
+      - name: No secret files in the diff
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref || 'main' }}" --depth=1 || true
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref || 'main' }}"...HEAD || true)
+          for f in $CHANGED; do
+            python3 - "$f" <<'PY'
+          import sys
+          sys.path.insert(0, ".claude/hooks")
+          from protect_secrets import is_protected
+          path = sys.argv[1]
+          hit = is_protected(path)
+          if hit:
+              print(f"::error file={path}::protected path modified (matched {hit!r})")
+              sys.exit(1)
+          PY
+          done
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - name: Unit tests
+        run: uv run pytest -q --junitxml=results.xml
+      - name: Ledger invariants
+        run: uv run pytest services/ledger -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: results.xml

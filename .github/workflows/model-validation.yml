@@ -1,0 +1,64 @@
+name: Model validation
+
+# Every change to ml/ passes the same four gates before it can merge. A data
+# scientist ships through this; so does an agent.
+#
+# STATUS: the gates below are agreed and specified, but ml/validation/ is not
+# implemented yet, so this workflow currently fails on Gate 1. That is
+# deliberate -- the contract was written first, in the review where the team
+# agreed what "validated" means. Implementing the four modules to satisfy it
+# is tracked as TESS-2310.
+on:
+  pull_request:
+    paths:
+      - "ml/**"
+      - ".github/workflows/model-validation.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gates:
+    name: Leakage, performance, drift, fairness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: Regenerate synthetic data
+        run: uv run python ml/data/generate.py
+
+      - name: Feature unit tests
+        run: uv run pytest ml/ -q
+
+      # Gate 1. The one that matters most. A feature that uses information
+      # unavailable at scoring time invalidates every number downstream of it.
+      - name: Gate 1 -- point-in-time correctness
+        run: uv run python -m ml.validation.leakage --fail-on-leak
+
+      # Gate 2. Against a recorded floor, on a temporal split.
+      - name: Gate 2 -- performance floor
+        run: uv run python -m ml.validation.performance --min-pr-auc 0.15
+
+      # Gate 3. Training distribution vs recent production traffic.
+      - name: Gate 3 -- drift
+        run: uv run python -m ml.validation.drift --max-psi 0.25
+
+      # Gate 4. Reported per slice, not in aggregate.
+      - name: Gate 4 -- fairness slices
+        run: uv run python -m ml.validation.fairness --report fairness.md
+
+      - name: Model card present and current
+        run: |
+          test -f ml/fraud/MODEL_CARD.md \
+            || { echo "::error::no model card -- MRM will not review this"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-report
+          path: |
+            fairness.md
+            ml/fraud/MODEL_CARD.md

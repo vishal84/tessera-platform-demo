@@ -1,0 +1,59 @@
+name: Claude code review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+# Least privilege: read the code, write a review. Nothing else.
+# id-token: write is required by claude-code-action itself -- it exchanges a
+# GitHub OIDC token for the credentials it posts comments with, independent
+# of which LLM credential (anthropic_api_key here) is configured below.
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: Review the diff
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true
+          prompt: |
+            Review this pull request using the payments-reviewer subagent.
+
+            Repository conventions are in CLAUDE.md. If the diff touches the
+            ledger, the ledger-invariants skill applies.
+
+            Post inline comments on the specific lines that need changing.
+            Lead with anything that loses money or exposes cardholder data.
+            Separate must-fix from worth-considering.
+
+            If the change is clean, say so briefly. Do not manufacture
+            findings.
+          # The action fails a run that finished successfully if num_turns (one per
+          # tool result) exceeds this cap, and parallel tool calls push num_turns
+          # well past the model round-trips the cap governs. Keep it generous;
+          # timeout-minutes above is the real bound. claude-code-action#1795
+          #
+          # Headless, a tool that is not listed is denied and nobody is there to
+          # answer a prompt, and every denial still costs a turn. Task runs the
+          # payments-reviewer subagent; Skill loads ledger-invariants. In agent
+          # mode the action registers its comment server only when the allowlist
+          # names it, so without the inline-comment tool the review runs to
+          # completion and posts nothing.
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Task,Skill,Read,Grep,Glob,Bash(uv run pytest:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
