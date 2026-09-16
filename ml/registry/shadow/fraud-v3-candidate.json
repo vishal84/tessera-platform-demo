@@ -1,0 +1,60 @@
+{
+  "model": "fraud-v3-candidate",
+  "champion": "fraud-v2",
+  "generated_at": "2026-09-16T08:40:00Z",
+  "window": {
+    "start": "2026-07-05",
+    "end": "2026-08-27",
+    "scored_transactions": 18000,
+    "labels": "confirmed fraud as of 2026-09-15; roughly 85% of fraud is eventually disputed"
+  },
+  "offline": {
+    "auc": 0.9059,
+    "pr_auc": 0.3578,
+    "source": "ml/notebooks/01_fraud_exploration.ipynb, cell 6"
+  },
+  "shadow": {
+    "auc": 0.6992,
+    "pr_auc": 0.0706,
+    "by_month": [
+      {
+        "month": "2026-07",
+        "n": 9074,
+        "auc": 0.706
+      },
+      {
+        "month": "2026-08",
+        "n": 8926,
+        "auc": 0.695
+      }
+    ]
+  },
+  "champion_same_window": {
+    "auc": 0.7782,
+    "pr_auc": 0.164
+  },
+  "features": [
+    "amount_log",
+    "hour",
+    "is_night",
+    "is_cross_border",
+    "mcc",
+    "device_card_count",
+    "card_chargeback_rate"
+  ],
+  "feature_serving": {
+    "card_chargeback_rate": {
+      "source": "card_history nightly batch",
+      "computed_from": "chargebacks filed as of scoring time, per card"
+    }
+  },
+  "feature_stats": {
+    "card_chargeback_rate": {
+      "training_nonzero_share": 0.2743,
+      "shadow_nonzero_share": 0.1419
+    }
+  },
+  "status": "blocked",
+  "reason": "shadow underperforms the champion on the same window",
+  "ticket": "TESS-2310"
+}

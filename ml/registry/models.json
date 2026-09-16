@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "name": "fraud-v2",
+      "role": "champion",
+      "status": "production",
+      "deployed": "2026-02-12",
+      "auc_holdout": 0.778,
+      "pr_auc_holdout": 0.164,
+      "features": 6,
+      "owner": "ml-fraud"
+    },
+    {
+      "name": "fraud-v3-candidate",
+      "role": "candidate",
+      "status": "shadow",
+      "registered": "2026-09-16",
+      "auc_holdout": 0.906,
+      "pr_auc_holdout": 0.358,
+      "features": 7,
+      "shadow_report": "ml/registry/shadow/fraud-v3-candidate.json",
+      "notebook": "ml/notebooks/01_fraud_exploration.ipynb",
+      "investigation_notebook": "ml/notebooks/03_v3_shadow_investigation.ipynb",
+      "owner": "ml-fraud",
+      "ticket": "TESS-2310"
+    }
+  ]
+}
