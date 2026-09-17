@@ -2,7 +2,7 @@
 
 # Fraud model response cache. Scoring the same card+amount repeatedly within a
 # short window produces the same decision, so caching absorbs most of the load.
-CACHE_TTL_SECONDS = 300
+CACHE_TTL_SECONDS = 0
 
 # Upstream call behaviour.
 REQUEST_TIMEOUT_SECONDS = None
