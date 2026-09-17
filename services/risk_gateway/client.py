@@ -77,6 +77,7 @@ class FraudClient:
         return f"{card_token}:{amount_minor}:{currency}"
 
     def score(self, *, card_token: str, amount_minor: int, currency: str) -> RiskDecision:
+        """Score a transaction. Raises rather than returning a decision on failure."""
         key = self._cache_key(card_token, amount_minor, currency)
         cached = self.cache.get(key)
         if cached is not None:
