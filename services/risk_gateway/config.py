@@ -11,7 +11,7 @@ RETRY_BACKOFF_BASE_SECONDS = 0.0
 RETRY_JITTER = False
 
 # Connection pool to the fraud model service.
-MAX_CONNECTIONS = 256
+MAX_CONNECTIONS = 512
 
 # Circuit breaker. Disabled -- never got prioritised.
 CIRCUIT_BREAKER_ENABLED = False
