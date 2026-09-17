@@ -1,0 +1,79 @@
+{"ts": "2026-09-17T13:58:00Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.0}
+{"ts": "2026-09-17T13:58:12Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 119.0}
+{"ts": "2026-09-17T13:58:40Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.0}
+{"ts": "2026-09-17T13:58:52Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 118.5}
+{"ts": "2026-09-17T13:59:20Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.0}
+{"ts": "2026-09-17T13:59:32Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 117.8}
+{"ts": "2026-09-17T14:00:00Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.1}
+{"ts": "2026-09-17T14:00:12Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 121.5}
+{"ts": "2026-09-17T14:00:40Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.0}
+{"ts": "2026-09-17T14:00:52Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 122.0}
+{"ts": "2026-09-17T14:01:20Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.1}
+{"ts": "2026-09-17T14:01:32Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 123.6}
+{"ts": "2026-09-17T14:02:00Z", "level": "INFO", "service": "risk-gateway", "event": "config_reloaded", "revision": "e460392"}
+{"ts": "2026-09-17T14:02:30Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 181.6}
+{"ts": "2026-09-17T14:03:15Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 404.8}
+{"ts": "2026-09-17T14:04:00Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 681.3}
+{"ts": "2026-09-17T14:04:45Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 889.2}
+{"ts": "2026-09-17T14:05:30Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 1185.4}
+{"ts": "2026-09-17T14:05:30Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2167.3}
+{"ts": "2026-09-17T14:05:30.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2171.1}
+{"ts": "2026-09-17T14:05:30.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2175.9}
+{"ts": "2026-09-17T14:05:30.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2326.5}
+{"ts": "2026-09-17T14:05:30.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:06:15Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 1334.6}
+{"ts": "2026-09-17T14:06:15Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2041.4}
+{"ts": "2026-09-17T14:06:15.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2232.0}
+{"ts": "2026-09-17T14:06:15.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2220.5}
+{"ts": "2026-09-17T14:06:15.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2301.1}
+{"ts": "2026-09-17T14:06:15.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:07:00Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 1566.7}
+{"ts": "2026-09-17T14:07:00Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2084.6}
+{"ts": "2026-09-17T14:07:00.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2225.4}
+{"ts": "2026-09-17T14:07:00.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2232.6}
+{"ts": "2026-09-17T14:07:00.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2311.4}
+{"ts": "2026-09-17T14:07:00.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:07:45Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 1822.0}
+{"ts": "2026-09-17T14:07:45Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2055.5}
+{"ts": "2026-09-17T14:07:45.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2158.8}
+{"ts": "2026-09-17T14:07:45.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2245.4}
+{"ts": "2026-09-17T14:07:45.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2296.4}
+{"ts": "2026-09-17T14:07:45.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:08:30Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 2164.0}
+{"ts": "2026-09-17T14:08:30Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2153.2}
+{"ts": "2026-09-17T14:08:30.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2079.8}
+{"ts": "2026-09-17T14:08:30.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2169.5}
+{"ts": "2026-09-17T14:08:30.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2262.7}
+{"ts": "2026-09-17T14:08:30.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:09:15Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 2413.4}
+{"ts": "2026-09-17T14:09:15Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2096.6}
+{"ts": "2026-09-17T14:09:15.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2223.4}
+{"ts": "2026-09-17T14:09:15.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2164.1}
+{"ts": "2026-09-17T14:09:15.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2266.1}
+{"ts": "2026-09-17T14:09:15.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:10:00Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 2551.8}
+{"ts": "2026-09-17T14:10:00Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2096.3}
+{"ts": "2026-09-17T14:10:00.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2094.9}
+{"ts": "2026-09-17T14:10:00.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2216.8}
+{"ts": "2026-09-17T14:10:00.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2240.4}
+{"ts": "2026-09-17T14:10:00.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:10:45Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 2806.6}
+{"ts": "2026-09-17T14:10:45Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2094.6}
+{"ts": "2026-09-17T14:10:45.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2242.0}
+{"ts": "2026-09-17T14:10:45.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2185.4}
+{"ts": "2026-09-17T14:10:45.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2321.5}
+{"ts": "2026-09-17T14:10:45.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:11:30Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 3017.4}
+{"ts": "2026-09-17T14:11:30Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2179.5}
+{"ts": "2026-09-17T14:11:30.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2151.7}
+{"ts": "2026-09-17T14:11:30.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2280.7}
+{"ts": "2026-09-17T14:11:30.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2356.7}
+{"ts": "2026-09-17T14:11:30.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:12:15Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 3386.4}
+{"ts": "2026-09-17T14:12:15Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 0, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2037.1}
+{"ts": "2026-09-17T14:12:15.200000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 1, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2129.4}
+{"ts": "2026-09-17T14:12:15.400000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 2, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2247.4}
+{"ts": "2026-09-17T14:12:15.600000Z", "level": "WARN", "service": "risk-gateway", "event": "fraud_model_attempt_failed", "attempt": 3, "error": "read timeout: no timeout configured, edge budget exhausted", "elapsed_ms": 2310.2}
+{"ts": "2026-09-17T14:12:15.900000Z", "level": "ERROR", "service": "risk-gateway", "event": "fraud_model_exhausted", "attempts": 4, "decision": "decline", "reason": "fail_closed"}
+{"ts": "2026-09-17T14:11:00Z", "level": "ERROR", "service": "risk-gateway", "event": "connection_pool_saturated", "in_use": 512, "max_connections": 512, "queued": 3118}
+{"ts": "2026-09-17T14:11:05Z", "level": "ERROR", "service": "risk-gateway", "event": "authorization_declined", "reason": "risk_unavailable", "count_last_60s": 4812}

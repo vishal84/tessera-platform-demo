@@ -1,0 +1,7 @@
+# Deploy timeline, 2026-09-17 UTC (from ArgoCD)
+#
+# service          started   finished  revision   deployed_by
+  payments-api     13:04:11  13:07:52  a19c4f2    ci-bot
+  kyc-adapter      13:41:03  13:43:19  7e2b810    ci-bot
+  risk-gateway     14:02:07  14:05:38  e460392    ci-bot
+  merchant-portal  14:19:55  14:24:02  cc90a17    ci-bot

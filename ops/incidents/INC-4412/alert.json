@@ -1,0 +1,32 @@
+{
+  "incident_id": "INC-4412",
+  "created_at": "2026-09-17T14:11:00Z",
+  "severity": "SEV-2",
+  "service": "risk-gateway",
+  "title": "Authorization success rate below SLO / p99 latency breach",
+  "source": "datadog-monitor-8841",
+  "triggered_conditions": [
+    {
+      "monitor": "payments.authorization.success_rate",
+      "slo_target": 0.995,
+      "observed": 0.708,
+      "window": "5m"
+    },
+    {
+      "monitor": "risk_gateway.fraud_model.p99_latency",
+      "threshold_seconds": 1.0,
+      "observed_seconds": 8.47,
+      "window": "5m",
+      "note": "p99 pinned at the 8.5s edge budget -- callers are timing out, not slow"
+    }
+  ],
+  "impacted": {
+    "declined_authorizations_estimated": 41300,
+    "merchants_affected": 2184,
+    "customer_reports": 63
+  },
+  "runbook": "ops/runbooks/risk-gateway.md",
+  "dashboards": [
+    "https://datadog.tessera.test/d/risk-gateway-overview"
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "trace_id": "4412a9c0e1f2b3d4",
+  "captured_at": "2026-09-17T14:09:00Z",
+  "note": "Representative slow authorization sampled during the incident.",
+  "spans": [
+    {
+      "span_id": "s0",
+      "parent": null,
+      "name": "POST /v1/authorizations",
+      "service": "payments-api",
+      "start_ms": 0,
+      "duration_ms": 8501,
+      "status": "error",
+      "attributes": {
+        "http.status_code": 504
+      }
+    },
+    {
+      "span_id": "s1",
+      "parent": "s0",
+      "name": "risk_gateway.score",
+      "service": "risk-gateway",
+      "start_ms": 4,
+      "duration_ms": 8492,
+      "status": "error",
+      "attributes": {
+        "cache.hit": false,
+        "retry.attempts": 4
+      }
+    },
+    {
+      "span_id": "s1-0",
+      "parent": "s1",
+      "name": "http POST fraud-model/v2/score (attempt 0)",
+      "service": "fraud-model",
+      "start_ms": 6,
+      "duration_ms": 2120,
+      "status": "error",
+      "attributes": {
+        "http.timeout_seconds": null,
+        "retry.backoff_ms": 0,
+        "queue.wait_ms": 2080,
+        "error": "deadline exceeded at caller"
+      }
+    },
+    {
+      "span_id": "s1-1",
+      "parent": "s1",
+      "name": "http POST fraud-model/v2/score (attempt 1)",
+      "service": "fraud-model",
+      "start_ms": 2128,
+      "duration_ms": 2125,
+      "status": "error",
+      "attributes": {
+        "http.timeout_seconds": null,
+        "retry.backoff_ms": 0,
+        "queue.wait_ms": 2085,
+        "error": "deadline exceeded at caller"
+      }
+    },
+    {
+      "span_id": "s1-2",
+      "parent": "s1",
+      "name": "http POST fraud-model/v2/score (attempt 2)",
+      "service": "fraud-model",
+      "start_ms": 4255,
+      "duration_ms": 2130,
+      "status": "error",
+      "attributes": {
+        "http.timeout_seconds": null,
+        "retry.backoff_ms": 0,
+        "queue.wait_ms": 2090,
+        "error": "deadline exceeded at caller"
+      }
+    },
+    {
+      "span_id": "s1-3",
+      "parent": "s1",
+      "name": "http POST fraud-model/v2/score (attempt 3)",
+      "service": "fraud-model",
+      "start_ms": 6387,
+      "duration_ms": 2135,
+      "status": "error",
+      "attributes": {
+        "http.timeout_seconds": null,
+        "retry.backoff_ms": 0,
+        "queue.wait_ms": 2095,
+        "error": "deadline exceeded at caller"
+      }
+    }
+  ]
+}
