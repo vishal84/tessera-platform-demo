@@ -1,0 +1,129 @@
+/*
+ * Tessera Console -- design tokens.
+ *
+ * This file is the design contract. Every colour, font and size the UI uses
+ * is a variable declared here; components never contain a literal. Replace
+ * the values (not the names) with the Claude Design output and everything
+ * restyles. Light values live on :root, dark values on [data-theme="dark"].
+ */
+
+:root {
+  /* surfaces and text */
+  --color-bg: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-surface-2: #eceef2;
+  --color-border: #d6dae1;
+  --color-text: #15181e;
+  --color-text-2: #4b5261;
+  --color-text-muted: #7b8392;
+  --color-accent: #2f5bea;
+  --color-accent-contrast: #ffffff;
+  --color-focus: #2f5bea;
+
+  /* status -- fixed meaning; always paired with an icon or label */
+  --status-good: #1e8a4c;
+  --status-warning: #b9791c;
+  --status-serious: #d9480f;
+  --status-critical: #c62828;
+  --status-info: #0f6fb8;
+  --status-neutral: #6b7280;
+
+  /* personas -- chips and timeline nodes */
+  --persona-sre: #0f766e;
+  --persona-swe: #1d4ed8;
+  --persona-ds: #be185d;
+  --persona-claude: #7c3aed;
+
+  /* JSON / code syntax -- evidence bundle payloads. Distinct from status
+     colours on purpose: a green string is a string, not a healthy thing.
+     All five clear WCAG AA against --color-surface-2, which is what code
+     blocks sit on. */
+  --syntax-key: #1d4ed8;
+  --syntax-string: #0f766e;
+  --syntax-number: #8f5200;
+  --syntax-literal: #7c3aed;
+  --syntax-punctuation: #5c6472;
+
+  /* chart series, fixed order: fraud-model rps, cache hit, p99, auth success */
+  --series-1: #3b6cf0;
+  --series-2: #0e9f8a;
+  --series-3: #e07b16;
+  --series-4: #8b5cf6;
+  --chart-grid: #e3e6eb;
+  --chart-axis: #9aa3b2;
+  --chart-marker-deploy: #6b7280;
+  --chart-marker-alert: #c62828;
+  --chart-cursor: #15181e;
+
+  /* typography */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.5rem;
+  --leading-tight: 1.2;
+  --leading-normal: 1.5;
+
+  /* spacing and shape (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --shadow-1: 0 1px 2px rgba(16, 20, 28, 0.06), 0 1px 1px rgba(16, 20, 28, 0.04);
+  --shadow-2: 0 6px 20px rgba(16, 20, 28, 0.10);
+}
+
+[data-theme="dark"] {
+  --color-bg: #0e1116;
+  --color-surface: #161a21;
+  --color-surface-2: #1e232c;
+  --color-border: #2a313c;
+  --color-text: #e7eaf0;
+  --color-text-2: #b4bcc9;
+  --color-text-muted: #7f8896;
+  --color-accent: #7a97ff;
+  --color-accent-contrast: #0e1116;
+  --color-focus: #9db2ff;
+
+  --status-good: #34c26a;
+  --status-warning: #e3a33a;
+  --status-serious: #f2782c;
+  --status-critical: #ef5350;
+  --status-info: #4aa3ea;
+  --status-neutral: #8b93a1;
+
+  --persona-sre: #2dd4bf;
+  --persona-swe: #6d9cff;
+  --persona-ds: #f472b6;
+  --persona-claude: #b48cff;
+
+  --syntax-key: #7a97ff;
+  --syntax-string: #4ade80;
+  --syntax-number: #e3a33a;
+  --syntax-literal: #b48cff;
+  --syntax-punctuation: #8b93a1;
+
+  --series-1: #6d9cff;
+  --series-2: #2dd4bf;
+  --series-3: #fbbf24;
+  --series-4: #c4a1ff;
+  --chart-grid: #232a34;
+  --chart-axis: #5b6472;
+  --chart-marker-deploy: #8b93a1;
+  --chart-marker-alert: #ef5350;
+  --chart-cursor: #e7eaf0;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
+}

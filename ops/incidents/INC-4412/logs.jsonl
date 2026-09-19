@@ -10,7 +10,7 @@
 {"ts": "2026-09-17T14:00:52Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 122.0}
 {"ts": "2026-09-17T14:01:20Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "hit", "latency_ms": 3.1}
 {"ts": "2026-09-17T14:01:32Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 123.6}
-{"ts": "2026-09-17T14:02:00Z", "level": "INFO", "service": "risk-gateway", "event": "config_reloaded", "revision": "e460392"}
+{"ts": "2026-09-17T14:02:00Z", "level": "INFO", "service": "risk-gateway", "event": "config_reloaded", "revision": "4b56e1d"}
 {"ts": "2026-09-17T14:02:30Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 181.6}
 {"ts": "2026-09-17T14:03:15Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 404.8}
 {"ts": "2026-09-17T14:04:00Z", "level": "INFO", "service": "risk-gateway", "event": "fraud_score_served", "cache": "miss", "latency_ms": 681.3}
