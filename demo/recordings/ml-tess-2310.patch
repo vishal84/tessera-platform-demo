@@ -1,0 +1,2431 @@
+From dc6abb1d0c63252b846ef1e65942314842f768ed Mon Sep 17 00:00:00 2001
+From: Tessera CI <ci@tessera.test>
+Date: Sun, 20 Sep 2026 14:30:26 -0400
+Subject: [PATCH] feat(ml): point-in-time card_chargeback_rate and the four
+ validation gates
+
+fraud-v3 reached shadow with card_chargeback_rate built as a whole-table
+groupby over chargeback_filed_at, a column that is non-null only on fraud
+rows and arrives 20-89 days late. Offline that scored AUC 0.906; served
+point-in-time in shadow it scored 0.699 against a champion's 0.778
+(TESS-2310).
+
+ml/features/aggregates.py -- card_chargeback_rate(df, as_of) counts only
+chargebacks filed strictly before the as-of instant, over that card's
+transactions that had happened strictly before it. Takes a scalar cutoff
+(how the nightly card_history batch serves it) or one instant per row (how a
+training table is built). Both bounds strict, so a row cannot count its own
+chargeback and tied timestamps cannot change the answer. Reproduces the
+investigation's shares exactly: non-zero on 3.44% of training rows and
+14.19% of scored rows.
+
+ml/validation/ -- the four gates model-validation.yml already specified,
+with exactly its flags. Gate 1 checks every feature by taking the future
+away: permute the label, censor chargebacks not yet filed at the cutoff,
+delete rows from after the cutoff, and fail if any value moves.
+ml/validation/tests/negative_fixtures.py keeps notebook 01's definition so
+the gate is tested by watching it fail on it.
+
+ml/fraud/MODEL_CARD.md -- the numbers MRM should see. Point-in-time the
+candidate scores PR-AUC 0.1590 against the champion's 0.1640, and the
+feature itself is worth -0.0012 PR-AUC. Recommendation: keep the promotion
+blocked, drop the feature, give device_card_count an as-of cut and re-run.
+
+All four gates pass on the synthetic table; uv run pytest ml/ is 57 green.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ .github/workflows/model-validation.yml   |   9 +-
+ ml/README.md                             |  28 +-
+ ml/features/aggregates.py                | 171 +++++++++++
+ ml/features/tests/test_aggregates.py     | 138 +++++++++
+ ml/fraud/MODEL_CARD.md                   | 358 +++++++++++++++++++++++
+ ml/validation/__init__.py                |  17 ++
+ ml/validation/candidate.py               |  56 ++++
+ ml/validation/dataset.py                 |  81 +++++
+ ml/validation/drift.py                   | 183 ++++++++++++
+ ml/validation/fairness.py                | 345 ++++++++++++++++++++++
+ ml/validation/leakage.py                 | 282 ++++++++++++++++++
+ ml/validation/performance.py             | 112 +++++++
+ ml/validation/tests/conftest.py          |  40 +++
+ ml/validation/tests/negative_fixtures.py |  56 ++++
+ ml/validation/tests/test_drift.py        |  77 +++++
+ ml/validation/tests/test_fairness.py     |  81 +++++
+ ml/validation/tests/test_leakage.py      | 143 +++++++++
+ ml/validation/tests/test_performance.py  |  52 ++++
+ 18 files changed, 2221 insertions(+), 8 deletions(-)
+ create mode 100644 ml/features/aggregates.py
+ create mode 100644 ml/features/tests/test_aggregates.py
+ create mode 100644 ml/fraud/MODEL_CARD.md
+ create mode 100644 ml/validation/__init__.py
+ create mode 100644 ml/validation/candidate.py
+ create mode 100644 ml/validation/dataset.py
+ create mode 100644 ml/validation/drift.py
+ create mode 100644 ml/validation/fairness.py
+ create mode 100644 ml/validation/leakage.py
+ create mode 100644 ml/validation/performance.py
+ create mode 100644 ml/validation/tests/conftest.py
+ create mode 100644 ml/validation/tests/negative_fixtures.py
+ create mode 100644 ml/validation/tests/test_drift.py
+ create mode 100644 ml/validation/tests/test_fairness.py
+ create mode 100644 ml/validation/tests/test_leakage.py
+ create mode 100644 ml/validation/tests/test_performance.py
+
+diff --git a/.github/workflows/model-validation.yml b/.github/workflows/model-validation.yml
+index 8424384..1c76c17 100644
+--- a/.github/workflows/model-validation.yml
++++ b/.github/workflows/model-validation.yml
+@@ -3,11 +3,10 @@ name: Model validation
+ # Every change to ml/ passes the same four gates before it can merge. A data
+ # scientist ships through this; so does an agent.
+ #
+-# STATUS: the gates below are agreed and specified, but ml/validation/ is not
+-# implemented yet, so this workflow currently fails on Gate 1. That is
+-# deliberate -- the contract was written first, in the review where the team
+-# agreed what "validated" means. Implementing the four modules to satisfy it
+-# is tracked as TESS-2310.
++# STATUS: implemented (TESS-2310). The contract below was written first, in
++# the review where the team agreed what "validated" means; ml/validation/ now
++# satisfies it. The flags here are the contract -- each gate's module takes
++# exactly these, so this file and the code cannot drift apart silently.
+ on:
+   pull_request:
+     paths:
+diff --git a/ml/README.md b/ml/README.md
+index ef40971..473d7fd 100644
+--- a/ml/README.md
++++ b/ml/README.md
+@@ -6,10 +6,12 @@ Models and features for fraud, credit and customer behaviour.
+ |---|---|
+ | `data/generate.py` | Synthetic transactions. The only source of data in this repo. |
+ | `features/base.py` | Point-in-time-safe base features. Tested. |
+-| `features/aggregates.py` | Historical aggregates. **Does not exist yet** — see below. |
+-| `fraud/` | Production fraud pipeline. **Does not exist yet.** |
+-| `notebooks/01_fraud_exploration.ipynb` | Where v3 currently lives. Messy. |
++| `features/aggregates.py` | Point-in-time historical aggregates. Tested. Every one takes an explicit `as_of`. |
++| `validation/` | The four gates CI runs on every change under `ml/`. See below. |
++| `fraud/MODEL_CARD.md` | fraud-v3 candidate card for MRM. The pipeline itself still lives in the notebook. |
++| `notebooks/01_fraud_exploration.ipynb` | Where v3 currently lives. Messy, and its `card_chargeback_rate` leaks — see the model card. |
+ | `notebooks/02_credit_scoring_draft.ipynb` | Draft scorecard. Not reviewed. |
++| `notebooks/03_v3_shadow_investigation.ipynb` | Why v3's shadow run underperformed. TESS-2310. |
+ | `profiles/segments.py` | Behavioural segmentation. Scaffolding. |
+ 
+ ## The rule
+@@ -25,6 +27,26 @@ backtest and do nothing in production.
+ of one row's observable fields. Historical aggregates are the dangerous kind
+ and need an explicit `as_of` cutoff.
+ 
++This is not a hypothetical. fraud-v3 reached shadow with a `card_chargeback_rate`
++built as a whole-table `groupby`; offline it scored AUC 0.906, in shadow 0.699
++against a champion's 0.778. `ml/fraud/MODEL_CARD.md` §9 has the whole story.
++
++## The four gates
++
++```bash
++uv run python -m ml.validation.leakage     --fail-on-leak      # point-in-time
++uv run python -m ml.validation.performance --min-pr-auc 0.15   # floor, temporal split
++uv run python -m ml.validation.drift       --max-psi 0.25      # training vs recent traffic
++uv run python -m ml.validation.fairness    --report fairness.md
++```
++
++`.github/workflows/model-validation.yml` runs all four on every pull request
++touching `ml/`. Gate 1 checks each feature by taking the future away —
++permuting the label, censoring chargebacks that had not been filed yet, and
++deleting rows from after the cutoff — and fails if any value moves. The
++definition that got past everyone the first time is kept as a negative fixture
++in `ml/validation/tests/`, so the gate is tested by watching it fail.
++
+ ## There is no real data here
+ 
+ `data/generate.py` produces everything. No cardholder data, no applicant data,
+diff --git a/ml/features/aggregates.py b/ml/features/aggregates.py
+new file mode 100644
+index 0000000..1c858aa
+--- /dev/null
++++ b/ml/features/aggregates.py
+@@ -0,0 +1,171 @@
++"""
++Point-in-time historical aggregates.
++
++Unlike `ml/features/base.py`, nothing in this module is a pure function of one
++row. Every feature here summarises *history*, which makes it the dangerous
++kind: the training table has the whole timeline in it and a `groupby` will
++happily average over the future.
++
++That is not hypothetical. `card_chargeback_rate` as written in
++`ml/notebooks/01_fraud_exploration.ipynb` cell 8 --
++
++    df.groupby("card_token").chargeback_filed_at.apply(lambda s: s.notna().mean())
++
++-- has no as-of cut, so every training row is handed chargebacks filed after
++it, including the one for that very transaction. `chargeback_filed_at` is
++non-null on fraud rows only and lands 20-89 days later (median 54), so the
++column is the label in disguise. Offline that scored AUC 0.906; in shadow,
++served point-in-time, it scored 0.699 against a champion's 0.778. Recomputed
++honestly the feature is worth -0.0007 AUC (TESS-2310; see
++`ml/notebooks/03_v3_shadow_investigation.ipynb` and `ml/fraud/MODEL_CARD.md`).
++
++The rule this module encodes: **every aggregate takes an explicit `as_of` and
++counts only events that had already happened at that instant.** `as_of` has no
++default, for the same reason `ml/profiles/segments.py` gives it none.
++
++Two ways to pass it:
++
++* a **scalar** -- one cutoff for every row. This is how the nightly
++  `card_history` batch serves the feature: one refresh time for the whole
++  scoring batch.
++* a **per-row series** -- typically ``df["timestamp"]``, i.e. each row as of
++  its own scoring moment. This is how a training table is built.
++
++`ml.validation.leakage` (Gate 1) checks both properties mechanically: values
++must not move when future rows are dropped, and must not move when
++not-yet-filed chargebacks are censored.
++"""
++
++from __future__ import annotations
++
++from collections.abc import Callable
++
++import numpy as np
++import pandas as pd
++
++__all__ = ["AGGREGATE_FEATURES", "build", "card_chargeback_rate"]
++
++AsOf = pd.Timestamp | pd.Series | np.ndarray | str
++
++
++def _require_columns(df: pd.DataFrame, columns: tuple[str, ...]) -> None:
++    missing = [c for c in columns if c not in df.columns]
++    if missing:
++        raise ValueError(
++            f"point-in-time aggregate needs {sorted(missing)}; "
++            "a frame without dispute history cannot produce this feature"
++        )
++
++
++def _epochs(values: pd.Series) -> np.ndarray:
++    """Datetimes as int64 nanoseconds. NaT keeps pandas' iNaT sentinel."""
++    return pd.to_datetime(values, utc=True).to_numpy(dtype="datetime64[ns]").astype("int64")
++
++
++def _as_of_epochs(df: pd.DataFrame, as_of: AsOf) -> np.ndarray:
++    """Normalise `as_of` -- scalar or per-row -- to one int64 instant per row."""
++    if isinstance(as_of, (pd.Series, np.ndarray, list)):
++        values = pd.Series(np.asarray(as_of))
++        if len(values) != len(df):
++            raise ValueError(
++                f"as_of has {len(values)} entries for {len(df)} rows; "
++                "pass one instant per row or a single scalar cutoff"
++            )
++    else:
++        values = pd.Series([as_of] * len(df))
++
++    stamps = pd.to_datetime(values, utc=True)
++    if stamps.isna().any():
++        raise ValueError("as_of contains NaT; every row needs a scoring instant")
++    return stamps.to_numpy(dtype="datetime64[ns]").astype("int64")
++
++
++def _count_strictly_before(
++    event_codes: np.ndarray,
++    event_times: np.ndarray,
++    query_codes: np.ndarray,
++    query_times: np.ndarray,
++) -> np.ndarray:
++    """
++    For each query `(code, t)`, how many events share that code and happened
++    strictly before `t`.
++
++    Both sides fold into one sortable int64 key, ``code * M + rank(time)``,
++    where `M` exceeds every rank -- so keys never collide across codes, each
++    code's events form one contiguous block, and a single pair of
++    `searchsorted` calls answers every row at once. The alternative, a Python
++    loop over cards, is the version that stops finishing when the table is
++    real.
++
++    `searchsorted(..., side="left")` is what makes the bound strict: an event
++    at exactly `t` is not yet observable at `t`.
++    """
++    n_queries = query_times.shape[0]
++    if event_times.size == 0:
++        return np.zeros(n_queries, dtype=np.int64)
++
++    universe = np.unique(np.concatenate([event_times, query_times]))
++    stride = np.int64(universe.size + 1)
++
++    keys = np.sort(event_codes.astype(np.int64) * stride + np.searchsorted(universe, event_times))
++    block_start = query_codes.astype(np.int64) * stride
++    starts = np.searchsorted(keys, block_start, side="left")
++    ends = np.searchsorted(keys, block_start + np.searchsorted(universe, query_times), side="left")
++    return ends - starts
++
++
++def card_chargeback_rate(df: pd.DataFrame, as_of: AsOf) -> pd.Series:
++    """
++    Share of a card's transactions that were already disputed at `as_of`.
++
++    For every row: the number of chargebacks on that card **filed** strictly
++    before `as_of`, over the number of that card's transactions that had
++    **happened** strictly before `as_of`. A card with no history at that
++    instant scores 0.0 -- it is a genuinely empty denominator, not a missing
++    value, and the model should read it as "nothing known yet".
++
++    Requires `card_token`, `timestamp` and `chargeback_filed_at`.
++
++    >>> rate = card_chargeback_rate(df, df["timestamp"])   # training table
++    >>> rate = card_chargeback_rate(df, "2026-09-20T00:00:00Z")  # batch refresh
++
++    Both bounds are strict, so the row being scored can never count itself and
++    ties in `timestamp` cannot change the answer -- the result does not depend
++    on row order, which the notebook version did.
++    """
++    _require_columns(df, ("card_token", "timestamp", "chargeback_filed_at"))
++    name = "card_chargeback_rate"
++    if df.empty:
++        return pd.Series(np.zeros(0), index=df.index, dtype=float, name=name)
++
++    instants = _as_of_epochs(df, as_of)
++    codes = pd.factorize(df["card_token"], use_na_sentinel=False)[0]
++    filed = df["chargeback_filed_at"]
++    disputed = filed.notna().to_numpy()
++
++    prior_txns = _count_strictly_before(codes, _epochs(df["timestamp"]), codes, instants)
++    prior_chargebacks = _count_strictly_before(
++        codes[disputed], _epochs(filed[disputed]), codes, instants
++    )
++
++    rate = np.divide(
++        prior_chargebacks,
++        prior_txns,
++        out=np.zeros(len(df), dtype=float),
++        where=prior_txns > 0,
++    )
++    return pd.Series(rate, index=df.index, name=name)
++
++
++# Every aggregate here takes (frame, as_of) and returns one column. Gate 1
++# walks this registry, so a feature added here is a feature that gets checked.
++AGGREGATE_FEATURES: dict[str, Callable[[pd.DataFrame, AsOf], pd.Series]] = {
++    "card_chargeback_rate": card_chargeback_rate,
++}
++
++
++def build(df: pd.DataFrame, as_of: AsOf) -> pd.DataFrame:
++    """Assemble every historical aggregate as of `as_of`."""
++    return pd.DataFrame(
++        {name: fn(df, as_of) for name, fn in AGGREGATE_FEATURES.items()}, index=df.index
++    )
+diff --git a/ml/features/tests/test_aggregates.py b/ml/features/tests/test_aggregates.py
+new file mode 100644
+index 0000000..e51efcf
+--- /dev/null
++++ b/ml/features/tests/test_aggregates.py
+@@ -0,0 +1,138 @@
++"""
++Tests for the point-in-time aggregates.
++
++The property under test is always the same one: a value may only depend on
++what had already happened at `as_of`. Each test below removes something from
++the future and asserts the answer did not move.
++"""
++
++import numpy as np
++import pandas as pd
++import pytest
++
++from ml.features.aggregates import build, card_chargeback_rate
++
++
++@pytest.fixture
++def history() -> pd.DataFrame:
++    """
++    One card with a late dispute, one card with none.
++
++    tok_a's first transaction is disputed, but the chargeback is not filed
++    until 2026-02-10 -- so it is invisible to the 2026-02-01 transaction and
++    visible to the 2026-03-01 one.
++    """
++    return pd.DataFrame(
++        {
++            "transaction_id": ["txn_1", "txn_2", "txn_3", "txn_4"],
++            "card_token": ["tok_a", "tok_a", "tok_a", "tok_b"],
++            "timestamp": pd.to_datetime(
++                ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z",
++                 "2026-01-15T00:00:00Z"]
++            ),
++            "chargeback_filed_at": pd.to_datetime(
++                ["2026-02-10T00:00:00Z", None, None, None]
++            ),
++            "amount_minor": [1_000, 2_000, 3_000, 4_000],
++        }
++    )
++
++
++def test_a_row_never_counts_its_own_chargeback(history):
++    """The notebook's bug, stated as a test: txn_1 is disputed and scores 0.0."""
++    rate = card_chargeback_rate(history, history["timestamp"])
++    assert rate.iloc[0] == 0.0
++
++
++def test_a_dispute_is_invisible_until_it_is_filed(history):
++    rate = card_chargeback_rate(history, history["timestamp"])
++    # txn_2: one prior transaction, its chargeback not yet filed.
++    assert rate.iloc[1] == 0.0
++    # txn_3: two prior transactions, one of them disputed by now.
++    assert rate.iloc[2] == pytest.approx(0.5)
++
++
++def test_a_card_with_no_history_scores_zero(history):
++    rate = card_chargeback_rate(history, history["timestamp"])
++    assert rate.iloc[3] == 0.0
++
++
++def test_cards_do_not_bleed_into_each_other(history):
++    """tok_b sits between two disputed tok_a rows in time and stays clean."""
++    rate = card_chargeback_rate(history, pd.Timestamp("2026-06-01T00:00:00Z"))
++    assert rate[history.card_token == "tok_a"].tolist() == [pytest.approx(1 / 3)] * 3
++    assert rate[history.card_token == "tok_b"].tolist() == [0.0]
++
++
++def test_scalar_as_of_applies_one_cutoff_to_every_row(history):
++    """How the nightly batch serves it: one refresh time for the whole batch."""
++    rate = card_chargeback_rate(history, "2026-02-15T00:00:00Z")
++    # tok_a by 2026-02-15: two transactions have happened, one is disputed.
++    assert rate[history.card_token == "tok_a"].tolist() == [pytest.approx(0.5)] * 3
++
++
++def test_the_bound_is_strict(history):
++    """A chargeback filed at exactly `as_of` is not yet observable at `as_of`."""
++    assert card_chargeback_rate(history, "2026-02-10T00:00:00Z").max() == 0.0
++    assert card_chargeback_rate(history, "2026-02-10T00:00:01Z").max() > 0.0
++
++
++def test_result_does_not_depend_on_row_order(history):
++    ordered = card_chargeback_rate(history, history["timestamp"])
++    shuffled = history.iloc[[2, 0, 3, 1]]
++    reordered = card_chargeback_rate(shuffled, shuffled["timestamp"])
++    pd.testing.assert_series_equal(reordered.sort_index(), ordered)
++
++
++def test_tied_timestamps_do_not_count_each_other(history):
++    """Two transactions at the same instant are each other's future, not past."""
++    tied = history.copy()
++    tied.loc[2, "timestamp"] = tied.loc[1, "timestamp"]
++    rate = card_chargeback_rate(tied, tied["timestamp"])
++    assert rate.iloc[1] == rate.iloc[2] == 0.0
++
++
++def test_dropping_future_rows_changes_nothing(history):
++    """Gate 1's future-rows check, at unit scale."""
++    full = card_chargeback_rate(history, history["timestamp"])
++    early = history[history["timestamp"] <= "2026-02-01T00:00:00Z"]
++    truncated = card_chargeback_rate(early, early["timestamp"])
++    pd.testing.assert_series_equal(truncated, full.loc[early.index])
++
++
++def test_rate_stays_within_zero_and_one(history):
++    rate = card_chargeback_rate(history, history["timestamp"])
++    assert rate.between(0.0, 1.0).all()
++
++
++def test_as_of_is_required():
++    with pytest.raises(TypeError):
++        card_chargeback_rate(pd.DataFrame())  # type: ignore[call-arg]
++
++
++def test_mismatched_as_of_length_is_rejected(history):
++    with pytest.raises(ValueError, match="one instant per row"):
++        card_chargeback_rate(history, history["timestamp"].iloc[:2])
++
++
++def test_missing_as_of_is_rejected(history):
++    with pytest.raises(ValueError, match="NaT"):
++        card_chargeback_rate(history, pd.Series([pd.NaT] * len(history)))
++
++
++def test_a_frame_without_dispute_history_is_rejected(history):
++    with pytest.raises(ValueError, match="chargeback_filed_at"):
++        card_chargeback_rate(history.drop(columns=["chargeback_filed_at"]), "2026-06-01T00:00:00Z")
++
++
++def test_empty_frame_returns_an_empty_column(history):
++    rate = card_chargeback_rate(history.iloc[:0], "2026-06-01T00:00:00Z")
++    assert rate.empty
++    assert rate.name == "card_chargeback_rate"
++
++
++def test_build_returns_every_registered_aggregate(history):
++    frame = build(history, history["timestamp"])
++    assert frame.columns.tolist() == ["card_chargeback_rate"]
++    assert len(frame) == len(history)
++    assert np.isfinite(frame.to_numpy(dtype=float)).all()
+diff --git a/ml/fraud/MODEL_CARD.md b/ml/fraud/MODEL_CARD.md
+new file mode 100644
+index 0000000..a3a746b
+--- /dev/null
++++ b/ml/fraud/MODEL_CARD.md
+@@ -0,0 +1,358 @@
++# Model card — fraud-v3-candidate
++
++| | |
++|---|---|
++| **Model** | `fraud-v3-candidate` (transaction fraud scoring) |
++| **Champion** | `fraud-v2`, in production since 2026-02-12 |
++| **Status** | **Blocked.** Shadow promotion stopped on 2026-09-16; see *Validation history*. |
++| **Owner** | ml-fraud |
++| **Ticket** | TESS-2310 |
++| **Card written** | 2026-09-20, for MRM review under SR 11-7 |
++| **Reviewed by** | *(pending MRM)* |
++
++This card supersedes the numbers in `ml/registry/models.json` and
++`ml/notebooks/01_fraud_exploration.ipynb`. **The recorded offline result of
++AUC 0.906 / PR-AUC 0.358 is withdrawn: it was target leakage, not
++performance.** The honest figures are below, and they are level with the
++champion.
++
++---
++
++## 1. Purpose and scope
++
++Scores a card authorization for fraud risk, synchronously, on the
++authorization path. The score is consumed by `services/risk_gateway`, which
++fails closed: if scoring is unavailable or times out, the transaction is
++declined.
++
++**In scope.** Ranking authorizations for (a) automatic decline above the
++decline band and (b) placement in the manual review queue, which has a budget
++of roughly the top 1% of traffic.
++
++**Out of scope, and not validated for:**
++
++- credit decisions of any kind — limits, approvals, pricing. This model is
++  trained on fraud outcomes, not repayment, and carries no adverse-action
++  reason-code mapping (§8);
++- merchant-level risk scoring or merchant offboarding;
++- chargeback representment, dispute liability, or any use where the target is
++  the dispute rather than the fraud;
++- any population outside card-present and card-not-present authorizations on
++  Tessera-issued consumer cards.
++
++The most likely scope creep is the third one: the model is trained against
++`is_fraud`, and `chargeback_filed_at` is a *different and later* event. Do not
++repoint it at disputes without revalidating from §2 down.
++
++---
++
++## 2. Training data
++
++| | |
++|---|---|
++| Source | `ml/data/generate.py` — **synthetic**, seed 20260917 |
++| Rows | 60,000 transactions |
++| Period | 2026-03-01 → 2026-08-27 (180 days) |
++| Entities | 6,000 cards, 400 merchants, 4,500 devices |
++| Base rate | 3.51% fraud (2,108 rows) |
++| Dispute coverage | 84.3% of fraud is eventually disputed (1,777 rows) |
++| Dispute lag | 20–89 days after the transaction, median 54 |
++
++There is no real cardholder data in this repository and there never will be.
++Every number in this card is computed on synthetic transactions; they
++establish that the pipeline is correct, not that the model performs in
++production. Production numbers come from shadow, which is where this candidate
++failed.
++
++**Split — temporal, not random.** Cut at the 70th percentile of `timestamp`,
++**2026-07-05 01:06:01 UTC**:
++
++| | rows | window | fraud rate |
++|---|---:|---|---:|
++| train | 42,000 | 2026-03-01 → 2026-07-05 | 3.51% |
++| scored | 18,000 | 2026-07-05 → 2026-08-27 | 3.53% |
++
++The scored window is deliberately the same window the shadow run scored, so
++offline and shadow numbers are directly comparable. A random split on this
++data flatters every model in it, and would have hidden the failure in §9
++entirely: with rows from the same card on both sides of the split, a
++whole-table card aggregate looks like a legitimate feature.
++
++---
++
++## 3. Features
++
++Seven features. The column that matters is **when the value becomes known** —
++it is the column this candidate failed on.
++
++| Feature | Source | Known at | Notes |
++|---|---|---|---|
++| `amount_log` | authorization message | authorization | `log1p(amount_minor)`, integer minor units |
++| `hour_of_day` | authorization timestamp | authorization | |
++| `is_night` | authorization timestamp | authorization | 01:00–05:00 local |
++| `is_cross_border` | authorization message | authorization | ⚠ geography proxy — see §5 |
++| `mcc_risk_tier` | MCC + published network risk table | authorization | static map in `ml/features/base.py`, revised by hand |
++| `amount_zscore_within_mcc` | amount + MCC | authorization | ⚠ **frame-dependent**: standardised against a mean and standard deviation computed over the whole frame. Uses no outcome data, so it is not leakage, but the two moments must be fit on the training window and frozen before ship. Tracked below. |
++| `card_chargeback_rate` | `card_history` nightly batch | **as of the last batch refresh — up to 24h stale** | ⚠ **historical aggregate.** Point-in-time by construction: `ml/features/aggregates.py` counts only chargebacks *filed* strictly before the as-of instant, over that card's transactions that had *happened* strictly before it. Contributes nothing — see §4. |
++
++**Aggregate `as_of` cutoffs.** `card_chargeback_rate` is the only aggregate.
++Training builds it with `as_of = df["timestamp"]` — each row as of its own
++scoring instant. Serving builds it with a scalar `as_of` — the batch refresh
++time. Both bounds are strict, so a transaction can never count its own
++chargeback and tied timestamps cannot change the answer.
++
++**Batch staleness.** The `card_history` job refreshes nightly, so at serving
++time the feature is between 0 and 24 hours old. A card disputed this morning
++looks clean until tomorrow's run. That is acceptable given the feature is
++worth nothing; it would not be acceptable if it were load-bearing.
++
++**Proxy attributes.** `is_cross_border` (and the `country` field it derives
++from) is a geography proxy; amount is a ticket-size proxy that correlates with
++income. Both are sliced in §5.
++
++**Not in the feature set, deliberately:** `device_card_count` from notebook 01.
++It is a genuine signal — the synthetic generator gives shared "mule" devices a
+++2.3 logit — but the notebook computes it as a whole-timeline
++`groupby("device_id").card_token.nunique()`, which has the same defect as the
++feature in §9 in a weaker form. It needs an as-of cut in
++`ml/features/aggregates.py` before it goes in, at which point Gate 1 will
++check it.
++
++---
++
++## 4. Performance
++
++Metric is **PR-AUC**. At a 3.5% base rate, ROC-AUC barely moves when precision
++in the alert queue collapses; both are reported, PR-AUC is the one the gate
++enforces.
++
++Point-in-time features, trained on the 42,000-row training window, evaluated
++on the 18,000-row scored window:
++
++| | PR-AUC | ROC-AUC |
++|---|---:|---:|
++| **fraud-v3-candidate (point-in-time)** | **0.1590** | **0.7788** |
++| fraud-v2 champion, same window | 0.1640 | 0.7782 |
++| fraud-v3-candidate **without** `card_chargeback_rate` | 0.1602 | 0.7802 |
++| *(withdrawn)* fraud-v3 offline, leaky feature | *0.3578* | *0.9059* |
++| *(reproduced)* fraud-v3 shadow, trained leaky / served point-in-time | 0.0706 | 0.6992 |
++
++**The candidate does not beat the champion.** On PR-AUC it is 0.005 behind.
++Adding `card_chargeback_rate` to the feature set *costs* 0.0012 PR-AUC and
++0.0014 ROC-AUC — it is noise with a positive-sounding name, and its
++correlation with the label on training rows, computed point-in-time, is
++**+0.0017** (the leaky version's was +0.285).
++
++At the operating point — top 1% of scores, threshold 0.2628, 189 alerts:
++
++| | value |
++|---|---:|
++| recall @ 1% review budget | 10.08% |
++| precision @ 1% review budget | 33.86% |
++
++By month, because a model that only works on average stops working in month
++three:
++
++| month | rows | fraud rate | PR-AUC | ROC-AUC | recall @ 1% |
++|---|---:|---:|---:|---:|---:|
++| 2026-07 | 9,074 | 3.60% | 0.1541 | 0.7683 | 8.87% |
++| 2026-08 | 8,926 | 3.45% | 0.1663 | 0.7900 | 11.36% |
++
++Two months is not a stability claim. It is the entire scored window available.
++
++---
++
++## 5. Fairness
++
++Tessera holds no protected-class attributes on an authorization, and this
++repository holds no cardholder data, so nothing below is a protected-class
++measurement. These are the proxies available on the authorization record. A
++statutory adverse-impact analysis needs attributes we deliberately do not
++hold and is run by Compliance separately.
++
++Every number is at the fixed 1% review budget, on the scored window.
++Regenerate with `uv run python -m ml.validation.fairness --report fairness.md`.
++
++**Alert-rate spread by dimension**
++
++| dimension | ratio | highest | lowest |
++|---|---:|---|---|
++| amount_band | 173.5x | Q4 > $70 — 3.84% | Q1 ≤ $13 — 0.02% |
++| geography | 16.5x | GB — 7.77% | US — 0.47% |
++| cross_border | 16.5x | cross-border — 7.77% | domestic — 0.47% |
++| time_of_day | 13.0x | night 01–05 — 3.90% | day — 0.30% |
++| mcc_risk_tier | 5.7x | tier 5 — 1.94% | tier 1 — 0.34% |
++
++**Geography**
++
++| slice | n | fraud rate | alert rate | TPR | FPR | precision | PR-AUC |
++|---|---:|---:|---:|---:|---:|---:|---:|
++| GB (cross-border) | 1,428 | 10.15% | 7.77% | 26.90% | 5.61% | 35.14% | 0.2860 |
++| US (domestic) | 16,572 | 2.96% | 0.47% | 5.10% | 0.33% | 32.05% | 0.1190 |
++
++**Ticket size**
++
++| slice | n | fraud rate | alert rate | TPR | precision | PR-AUC |
++|---|---:|---:|---:|---:|---:|---:|
++| Q1 ≤ $13 | 4,513 | 1.09% | 0.02% | **0.00%** | 0.00% | 0.0278 |
++| Q2 $13–30 | 4,450 | 1.93% | 0.07% | **0.00%** | 0.00% | 0.0438 |
++| Q3 $30–70 | 4,484 | 3.19% | 0.22% | 2.80% | 40.00% | 0.1211 |
++| Q4 > $70 | 4,553 | 7.84% | 3.84% | 16.81% | 34.29% | 0.2160 |
++
++**Time of day**: night 01–05 TPR 19.64% (n 3,739) against day TPR 2.54%
++(n 14,261).
++
++**Read it this way.** Cross-border traffic is alerted 16.5× as often as
++domestic, against a fraud rate only 3.4× higher: GB cardholders absorb more
++friction per unit of risk than the ratio of base rates justifies, and its FPR
++is 5.61% against 0.33% domestic. That is defensible on the numbers — precision
++holds at 35% — but it is a disparity, it is not small, and it should be a
++conscious decision rather than a discovered one.
++
++The clearer defect is the other end: **the bottom two ticket-size quartiles
++catch no fraud at all** at this budget. 49 and 86 frauds respectively, zero
++detected. Small-ticket fraud — including card-testing, which is small by
++definition — is not covered by this model at a 1% budget. Alert-rate parity is
++not the right fix; a second, cheaper rule for low-value card testing is.
++
++---
++
++## 6. Limitations and failure modes
++
++1. **The candidate is not better than the champion** (§4). There is no
++   performance argument for promoting it.
++2. **`card_chargeback_rate` contributes nothing.** Computed correctly it
++   carries no signal. It cannot be recovered by reweighting or recalibration —
++   the information simply is not there at scoring time. The recommendation is
++   to drop it from the v3 feature set; it is retained in the validated
++   pipeline only so the gates keep measuring it while the decision is open.
++3. **A failed batch looks like a clean card.** If the nightly `card_history`
++   job does not run, the feature serves 0.0, which is indistinguishable from
++   "this card has no history". The model reads a broken pipeline as
++   reassurance. Given the feature's weight this is currently harmless; it
++   becomes a real failure mode the moment any history feature matters. Alarm
++   on batch age (§7), not on the feature value.
++4. **Thin files are conflated with clean files.** A card with no prior
++   transactions scores 0.0, the same value as a card with a long clean
++   history. There is no "unknown" state.
++5. **Cold start shifts the feature between training and production.** The
++   point-in-time rate is non-zero on 3.44% of training rows against 14.19% of
++   scored rows, because cards accumulate history as the timeline runs
++   (PSI 0.16, §7). This is a real distribution difference, not an error — and
++   it is exactly the kind of gap that gets misread as drift when it is
++   structural.
++6. **`amount_zscore_within_mcc` is fit over the whole frame** (§3). Freeze the
++   moments on the training window before ship.
++7. **No device-graph feature** (§3), so the strongest remaining signal in the
++   data is unused.
++8. **Two months of evaluation.** Fraud is non-stationary; nothing here speaks
++   to behaviour beyond 54 days.
++9. **Synthetic data throughout.** These numbers validate the pipeline, not the
++   model's production performance.
++
++---
++
++## 7. Monitoring plan
++
++**Pre-merge** — `.github/workflows/model-validation.yml` runs four gates on
++every change under `ml/`. All four pass on this candidate:
++
++| Gate | Command | Current |
++|---|---|---|
++| 1. point-in-time | `python -m ml.validation.leakage --fail-on-leak` | PASS — 15 checks, no feature moves under label permutation, outcome censoring, or future-row deletion |
++| 2. performance | `python -m ml.validation.performance --min-pr-auc 0.15` | PASS — PR-AUC 0.1590 (floor 0.15, margin 6%) |
++| 3. drift | `python -m ml.validation.drift --max-psi 0.25` | PASS — worst PSI 0.1649, `card_chargeback_rate` |
++| 4. fairness | `python -m ml.validation.fairness --report fairness.md` | PASS — report-only; §5 |
++
++Gate 2's margin is thin by construction: the floor is the champion's PR-AUC
++and this candidate is level with the champion. A regression of 0.01 fails CI.
++
++**In production**
++
++| Signal | Cadence | Threshold | Action |
++|---|---|---|---|
++| Score distribution PSI vs training | daily | > 0.10 review, > 0.25 page | risk-gateway on-call, `ops/runbooks/risk-gateway.md` |
++| Per-feature PSI | daily | as above | ml-fraud |
++| `card_chargeback_rate` non-zero share | daily | outside 10–20% | ml-fraud — a step change here means the batch definition moved, which is what TESS-2310 was |
++| `card_history` batch age at scoring | continuous | > 26h | page — the feature is silently zero past this point |
++| Alert rate vs the 1% budget | hourly | ±50% of budget | risk-gateway on-call |
++| Per-slice alert rate (§5 dimensions) | weekly | 25% change in any dimension's ratio | ml-fraud |
++| Precision in the review queue | weekly | < 25% | ml-fraud |
++| PR-AUC on matured labels | monthly, 90-day lag | < 0.15 | ml-fraud |
++
++Note the lag on the last row and why the rows above it exist. Disputes arrive
++20–89 days after the transaction, so accuracy metrics cannot be an alarm —
++by the time PR-AUC moves, two months of decisions have already been made.
++Drift and feature-population monitors are the actual alarm; label-based
++metrics are confirmation after the fact.
++
++---
++
++## 8. Decisions and explanations
++
++This model produces a fraud score, not a credit decision. A fraud decline is
++not an adverse action under ECOA/Reg B, and no adverse-action notice or
++reason-code mapping is required or provided. If this model is ever pointed at
++a credit decision, that mapping and its evidence must be built first, and this
++card does not cover that use (§1).
++
++Score consumption:
++
++| Band | Action |
++|---|---|
++| ≥ decline threshold | declined at `services/risk_gateway`, cardholder sees a generic decline |
++| top ~1% of scores, below decline | manual review queue |
++| otherwise | approved |
++
++Support and the cardholder see a decline category, not a score. One
++constraint on those categories: **do not surface a reason that names card
++dispute history.** The feature that would justify such a reason contributes
+++0.0017 correlation — a reason code citing it would not be the real reason,
++and a reason code that is not the real reason is the problem regardless of
++which regulation applies.
++
++---
++
++## 9. Validation history
++
++**2026-09-16 — promotion blocked.** Offline the candidate scored AUC 0.906 /
++PR-AUC 0.358. In shadow over 2026-07-05 → 2026-08-27 it scored 0.699 / 0.071,
++*below* the 0.778 / 0.164 champion. Report:
++`ml/registry/shadow/fraud-v3-candidate.json`.
++
++**Root cause — target leakage plus train/serve skew in one feature.**
++`card_chargeback_rate` was defined in `ml/notebooks/01_fraud_exploration.ipynb`
++cell 8 as a whole-table aggregate:
++
++```python
++df.groupby("card_token").chargeback_filed_at.apply(lambda s: s.notna().mean())
++```
++
++No as-of cut. `chargeback_filed_at` is non-null on 1,777 rows and **every one
++of them is fraud** — it is the label under another name — and it is populated
++20–89 days after the transaction. So every training row was handed
++chargebacks filed after it, including the one filed against itself. Offline,
++train and test both got the leaky version and the leak scored itself: 0.906.
++Production serves the point-in-time version. Training saw the feature
++non-zero on 27.43% of rows; serving saw 14.19%. In training the feature
++selected a slice with 18.8× the fraud rate, so the model made it the dominant
++split; at serving the same condition selected a slice with 0.97× the fraud
++rate. The model's strongest split was firing at random, which is why the
++candidate landed *below* a champion that never had the feature.
++
++Full analysis: `ml/notebooks/03_v3_shadow_investigation.ipynb`. It reproduces
++all three numbers — offline 0.9059/0.3578, shadow 0.6992/0.0706, honest
++0.7775/0.1562 — to four decimals.
++
++**2026-09-20 — productionised (this card).** The point-in-time implementation
++lives in `ml/features/aggregates.py` with tests in `ml/features/tests/`; the
++four gates live in `ml/validation/`. The notebook's definition is kept as a
++negative fixture in `ml/validation/tests/negative_fixtures.py`, and Gate 1
++fails on it — that failure is itself a test, so the gate cannot rot into a
++no-op.
++
++**Recommendation to MRM.** Keep the promotion blocked. Drop
++`card_chargeback_rate` from the v3 feature set — point-in-time it is worth
++−0.0012 PR-AUC. Give `device_card_count` an as-of cut and re-run: the device
++signal is real and currently unused, and it is the only candidate change in
++front of us with a plausible path past the champion.
+diff --git a/ml/validation/__init__.py b/ml/validation/__init__.py
+new file mode 100644
+index 0000000..86e1c26
+--- /dev/null
++++ b/ml/validation/__init__.py
+@@ -0,0 +1,17 @@
++"""
++The four gates every change to `ml/` passes before it can merge.
++
++    uv run python -m ml.validation.leakage     --fail-on-leak
++    uv run python -m ml.validation.performance --min-pr-auc 0.15
++    uv run python -m ml.validation.drift       --max-psi 0.25
++    uv run python -m ml.validation.fairness    --report fairness.md
++
++The contract lives in `.github/workflows/model-validation.yml`; these modules
++implement it (TESS-2310). Each gate is a module with a `run()` that returns a
++result object and a `main()` that prints a report and returns an exit status,
++so the same logic is callable from a test and from CI.
++
++Gate 1 is the one that matters most and the reason the other three exist: a
++feature that uses information unavailable at scoring time invalidates every
++number downstream of it, including gates 2, 3 and 4.
++"""
+diff --git a/ml/validation/candidate.py b/ml/validation/candidate.py
+new file mode 100644
+index 0000000..b7e4e00
+--- /dev/null
++++ b/ml/validation/candidate.py
+@@ -0,0 +1,56 @@
++"""
++The model under validation: fraud-v3, point-in-time.
++
++This is the one definition of "the candidate" that gates 1, 2, 3 and 4 all
++read, so a feature cannot be validated in one shape and measured in another --
++which is precisely how fraud-v3 got to shadow (trained on a whole-table
++`card_chargeback_rate`, served a point-in-time one, TESS-2310).
++
++Feature construction has one rule that is easy to get backwards: **build on
++the whole frame, then split.** The aggregates are point-in-time, so a scored
++row correctly sees the history that precedes it -- including rows from the
++training window, exactly as the nightly `card_history` batch does in
++production. Splitting first would hand scored rows an empty history and
++understate the feature.
++"""
++
++from __future__ import annotations
++
++import numpy as np
++import pandas as pd
++from sklearn.ensemble import HistGradientBoostingClassifier
++
++from ml.features import aggregates, base
++from ml.validation.dataset import LABEL
++
++# Matches ml/notebooks/01_fraud_exploration.ipynb so the numbers stay
++# comparable to the recorded champion and shadow runs. Deterministic.
++MODEL_PARAMS = {"max_iter": 250, "random_state": 0}
++
++FEATURE_ORDER: tuple[str, ...] = (*base.BASE_FEATURES, *aggregates.AGGREGATE_FEATURES)
++
++
++def build_features(df: pd.DataFrame) -> pd.DataFrame:
++    """
++    The candidate's feature matrix, each row as of its own scoring instant.
++
++    Pass the *whole* history frame; slice the result afterwards.
++    """
++    frame = base.build(df)
++    for name, column in aggregates.build(df, df["timestamp"]).items():
++        frame[name] = column
++    return frame[list(FEATURE_ORDER)]
++
++
++def fit(features: pd.DataFrame, labels: pd.Series) -> HistGradientBoostingClassifier:
++    return HistGradientBoostingClassifier(**MODEL_PARAMS).fit(features, labels)
++
++
++def fit_on_split(features: pd.DataFrame, df: pd.DataFrame, train_index: pd.Index):
++    """Fit on the training rows of an already-built feature matrix."""
++    return fit(features.loc[train_index], df.loc[train_index, LABEL])
++
++
++def score(model: HistGradientBoostingClassifier, features: pd.DataFrame) -> np.ndarray:
++    """P(fraud) for each row."""
++    return model.predict_proba(features)[:, 1]
+diff --git a/ml/validation/dataset.py b/ml/validation/dataset.py
+new file mode 100644
+index 0000000..3ea4216
+--- /dev/null
++++ b/ml/validation/dataset.py
+@@ -0,0 +1,81 @@
++"""
++Loading and splitting, shared by all four gates.
++
++One temporal split, defined once. Every gate reports against the same windows
++so their numbers can be read side by side: train on the first 70% of the
++timeline, evaluate on the last 30% -- which is the window the fraud-v3 shadow
++run scored (2026-07-05 to 2026-08-27).
++"""
++
++from __future__ import annotations
++
++import argparse
++from dataclasses import dataclass
++from pathlib import Path
++
++import pandas as pd
++
++ROOT = Path(__file__).resolve().parents[2]
++DEFAULT_DATA = ROOT / "ml" / "data" / "transactions.parquet"
++
++# Temporal, never random. Fraud is non-stationary and a random split flatters
++# everything -- it also hides exactly the failure Gate 1 looks for.
++SPLIT_QUANTILE = 0.70
++
++TIME_COLUMNS = ("timestamp", "chargeback_filed_at")
++LABEL = "is_fraud"
++
++
++@dataclass(frozen=True)
++class Split:
++    """A temporal split: everything up to `cut` trains, everything after scores."""
++
++    train: pd.DataFrame
++    test: pd.DataFrame
++    cut: pd.Timestamp
++
++    @property
++    def window(self) -> str:
++        return f"{self.test['timestamp'].min().date()} -> {self.test['timestamp'].max().date()}"
++
++
++def load_transactions(path: Path | str | None = None) -> pd.DataFrame:
++    """
++    Load the transaction table, sorted by time with a fresh index.
++
++    Synthetic throughout -- `ml/data/generate.py` is the only source of data in
++    this repository. `generate.py` falls back to CSV when pyarrow is missing,
++    so accept either.
++    """
++    path = Path(path) if path is not None else DEFAULT_DATA
++    if not path.exists() and path.suffix == ".parquet" and path.with_suffix(".csv").exists():
++        path = path.with_suffix(".csv")
++    if not path.exists():
++        raise FileNotFoundError(
++            f"{path} not found -- run `uv run python -m ml.data.generate` first"
++        )
++
++    df = pd.read_csv(path) if path.suffix == ".csv" else pd.read_parquet(path)
++    for column in TIME_COLUMNS:
++        if column in df.columns:
++            df[column] = pd.to_datetime(df[column], utc=True)
++    return df.sort_values("timestamp", kind="stable").reset_index(drop=True)
++
++
++def temporal_split(df: pd.DataFrame, quantile: float = SPLIT_QUANTILE) -> Split:
++    cut = df["timestamp"].quantile(quantile)
++    return Split(
++        train=df[df["timestamp"] <= cut].copy(),
++        test=df[df["timestamp"] > cut].copy(),
++        cut=cut,
++    )
++
++
++def add_data_argument(parser: argparse.ArgumentParser) -> None:
++    """`--data` on every gate, so a gate can be pointed at a fixture."""
++    parser.add_argument(
++        "--data",
++        type=Path,
++        default=None,
++        help=f"transaction table to validate (default: {DEFAULT_DATA.relative_to(ROOT)})",
++    )
+diff --git a/ml/validation/drift.py b/ml/validation/drift.py
+new file mode 100644
+index 0000000..3944658
+--- /dev/null
++++ b/ml/validation/drift.py
+@@ -0,0 +1,183 @@
++"""
++Gate 3 -- drift between the training distribution and recent traffic.
++
++    uv run python -m ml.validation.drift --max-psi 0.25
++
++Population Stability Index per feature, reference = the training window,
++current = the most recent traffic (here the scored window; in production this
++reads served feature values out of the feature store for the same period).
++The usual reading: below 0.10 stable, 0.10-0.25 worth watching, above 0.25 the
++model is being asked about a population it was not trained on.
++
++PSI is computed over quantile bins of the *reference*, and the binning is
++deliberately spike-aware. Most fraud features are mostly zero --
++`card_chargeback_rate` is zero for 96.6% of training rows -- and naive
++`histogram` edges put the entire point mass and everything above it in one
++bin, which reports 0.000 drift for a feature whose non-zero share quadrupled.
++A gate that cannot see the one feature it most needs to watch is worse than no
++gate.
++
++What this gate cannot see: train/serve skew. A feature computed one way in
++training and another way at serving time shows up here as drift only by
++accident, and in the fraud-v3 shadow run it did not -- the population had not
++changed, the feature definition had. That is Gate 1's job, and the reason
++Gate 1 runs first.
++"""
++
++from __future__ import annotations
++
++import argparse
++from dataclasses import dataclass
++
++import numpy as np
++import pandas as pd
++
++from ml.validation import candidate
++from ml.validation.dataset import add_data_argument, load_transactions, temporal_split
++
++DEFAULT_MAX_PSI = 0.25
++DEFAULT_BINS = 10
++EPSILON = 1e-6
++
++
++@dataclass(frozen=True)
++class FeatureDrift:
++    feature: str
++    psi: float
++    bins: int
++    reference_mean: float
++    current_mean: float
++
++    @property
++    def band(self) -> str:
++        if self.psi < 0.10:
++            return "stable"
++        return "watch" if self.psi < DEFAULT_MAX_PSI else "significant"
++
++
++@dataclass(frozen=True)
++class DriftReport:
++    features: tuple[FeatureDrift, ...]
++    n_reference: int
++    n_current: int
++    window: str
++    maximum: float
++
++    @property
++    def worst(self) -> FeatureDrift:
++        return max(self.features, key=lambda f: f.psi)
++
++    @property
++    def passed(self) -> bool:
++        return all(f.psi <= self.maximum for f in self.features)
++
++
++def bin_edges(reference: np.ndarray, bins: int = DEFAULT_BINS) -> np.ndarray:
++    """
++    Interior cut points from the reference distribution.
++
++    Bin `i` is the half-open interval `(edge[i-1], edge[i]]`, so a value
++    sitting exactly on a cut point falls in the lower bin -- which is what
++    keeps a point mass at zero in a bin of its own.
++    """
++    quantiles = np.unique(np.nanquantile(reference, np.linspace(0, 1, bins + 1)))
++    interior = quantiles[1:-1]
++    if interior.size:
++        return interior
++
++    distinct = np.unique(reference[~np.isnan(reference)])
++    return distinct[:1] if distinct.size > 1 else np.array([])
++
++
++def population_stability_index(
++    reference: np.ndarray, current: np.ndarray, bins: int = DEFAULT_BINS
++) -> tuple[float, int]:
++    """PSI of `current` against `reference`, plus the number of bins used."""
++    edges = bin_edges(reference, bins)
++    if edges.size == 0 or reference.size == 0 or current.size == 0:
++        return 0.0, 1
++
++    n_bins = edges.size + 1
++    reference_share = np.bincount(np.searchsorted(edges, reference, side="left"), minlength=n_bins)
++    current_share = np.bincount(np.searchsorted(edges, current, side="left"), minlength=n_bins)
++
++    expected = np.clip(reference_share / reference.size, EPSILON, None)
++    actual = np.clip(current_share / current.size, EPSILON, None)
++    return float(np.sum((actual - expected) * np.log(actual / expected))), n_bins
++
++
++def run(
++    df: pd.DataFrame, maximum: float = DEFAULT_MAX_PSI, bins: int = DEFAULT_BINS
++) -> DriftReport:
++    features = candidate.build_features(df)
++    split = temporal_split(df)
++    reference, current = features.loc[split.train.index], features.loc[split.test.index]
++
++    measured = []
++    for name in features.columns:
++        left = reference[name].to_numpy(dtype=float)
++        right = current[name].to_numpy(dtype=float)
++        psi, n_bins = population_stability_index(left, right, bins)
++        measured.append(
++            FeatureDrift(
++                feature=name,
++                psi=psi,
++                bins=n_bins,
++                reference_mean=float(np.nanmean(left)),
++                current_mean=float(np.nanmean(right)),
++            )
++        )
++
++    return DriftReport(
++        features=tuple(measured),
++        n_reference=len(reference),
++        n_current=len(current),
++        window=split.window,
++        maximum=maximum,
++    )
++
++
++def format_report(report: DriftReport) -> str:
++    lines = [
++        "Gate 3 -- drift, training vs recent traffic",
++        f"  reference: {report.n_reference:,} training rows",
++        f"  current  : {report.n_current:,} rows, {report.window}",
++        "",
++        f"  {'feature':<28} {'PSI':>8}  {'bins':>4}  {'ref mean':>10}  {'cur mean':>10}  band",
++    ]
++    for feature in sorted(report.features, key=lambda f: f.psi, reverse=True):
++        lines.append(
++            f"  {feature.feature:<28} {feature.psi:>8.4f}  {feature.bins:>4}  "
++            f"{feature.reference_mean:>10.4f}  {feature.current_mean:>10.4f}  {feature.band}"
++        )
++
++    worst = report.worst
++    lines += ["", f"  {'PASS' if report.passed else 'FAIL'} -- worst PSI {worst.psi:.4f} "
++              f"({worst.feature}), ceiling {report.maximum:.4f}"]
++    return "\n".join(lines)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description="Gate 3: drift against recent traffic.")
++    add_data_argument(parser)
++    parser.add_argument(
++        "--max-psi",
++        type=float,
++        default=DEFAULT_MAX_PSI,
++        help=f"PSI ceiling for any single feature (default {DEFAULT_MAX_PSI})",
++    )
++    parser.add_argument("--bins", type=int, default=DEFAULT_BINS, help="reference quantile bins")
++    args = parser.parse_args(argv)
++
++    report = run(load_transactions(args.data), maximum=args.max_psi, bins=args.bins)
++    print(format_report(report))
++
++    if not report.passed:
++        drifted = [f"{f.feature} ({f.psi:.4f})" for f in report.features if f.psi > report.maximum]
++        print(f"\n::error::PSI above {report.maximum:.4f}: {', '.join(drifted)}")
++        return 1
++    return 0
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(main())
+diff --git a/ml/validation/fairness.py b/ml/validation/fairness.py
+new file mode 100644
+index 0000000..327866b
+--- /dev/null
++++ b/ml/validation/fairness.py
+@@ -0,0 +1,345 @@
++"""
++Gate 4 -- fairness, reported per slice.
++
++    uv run python -m ml.validation.fairness --report fairness.md
++
++Aggregate metrics hide the thing MRM asks about. A model can hold PR-AUC
++steady while declining a quarter of one country's traffic, so every number
++here is reported per slice at a fixed review budget: the top 1% of scores,
++which is what an alert queue actually costs.
++
++Tessera holds no protected-class attributes on a transaction, and this
++repository holds no cardholder data at all, so nothing below is a
++protected-class measurement. The slices are the proxies available on the
++authorization record -- geography, cross-border status, merchant category
++risk, ticket size and time of day. Geography and ticket size are the ones that
++correlate with protected characteristics in the literature, so they are the
++ones to read first. A real adverse-impact analysis needs attributes we
++deliberately do not hold, and is done by Compliance on their side.
++
++The gate reports by default and blocks only when `--max-disparity` is given,
++so the team can tighten it without changing the CI contract.
++"""
++
++from __future__ import annotations
++
++import argparse
++from dataclasses import dataclass
++from datetime import UTC, datetime
++from pathlib import Path
++
++import numpy as np
++import pandas as pd
++from sklearn.metrics import average_precision_score
++
++from ml.features.base import MCC_RISK_TIER
++from ml.validation import candidate
++from ml.validation.dataset import LABEL, ROOT, add_data_argument, load_transactions, temporal_split
++
++# Share of the scored window sent to manual review. The operating point has to
++# be fixed for slice comparisons to mean anything.
++REVIEW_BUDGET = 0.01
++
++# Below this a slice's rates are noise; it is still listed, with metrics
++# blanked, because a slice too small to measure is itself worth seeing.
++MIN_SLICE = 200
++
++DEFAULT_REPORT = Path("fairness.md")
++
++
++@dataclass(frozen=True)
++class SliceMetrics:
++    dimension: str
++    slice: str
++    n: int
++    frauds: int
++    fraud_rate: float
++    alert_rate: float
++    tpr: float | None
++    fpr: float | None
++    precision: float | None
++    pr_auc: float | None
++
++    @property
++    def measurable(self) -> bool:
++        return self.n >= MIN_SLICE and self.frauds > 0
++
++
++@dataclass(frozen=True)
++class Disparity:
++    dimension: str
++    ratio: float
++    high: str
++    high_rate: float
++    low: str
++    low_rate: float
++
++
++@dataclass(frozen=True)
++class FairnessReport:
++    slices: tuple[SliceMetrics, ...]
++    disparities: tuple[Disparity, ...]
++    threshold: float
++    window: str
++    n_scored: int
++    fraud_rate: float
++    data_path: str
++    max_disparity: float | None
++
++    @property
++    def worst(self) -> Disparity | None:
++        return max(self.disparities, key=lambda d: d.ratio, default=None)
++
++    @property
++    def passed(self) -> bool:
++        if self.max_disparity is None:
++            return True
++        return all(d.ratio <= self.max_disparity for d in self.disparities)
++
++
++def slice_definitions(df: pd.DataFrame, train: pd.DataFrame) -> dict[str, pd.Series]:
++    """Slice labels for the scored rows. Amount bands come from the training window."""
++    edges = train["amount_minor"].quantile([0.25, 0.50, 0.75]).to_numpy()
++    band_labels = np.array(
++        [
++            f"Q1 <= ${edges[0] / 100:,.0f}",
++            f"Q2 ${edges[0] / 100:,.0f}-${edges[1] / 100:,.0f}",
++            f"Q3 ${edges[1] / 100:,.0f}-${edges[2] / 100:,.0f}",
++            f"Q4 > ${edges[2] / 100:,.0f}",
++        ]
++    )
++    hour = df["timestamp"].dt.hour
++
++    return {
++        "geography": df["country"].astype(str),
++        "cross_border": df["is_cross_border"].map({0: "domestic", 1: "cross-border"}),
++        "mcc_risk_tier": "tier " + df["mcc"].map(MCC_RISK_TIER).fillna(3).astype(int).astype(str),
++        "amount_band": pd.Series(
++            band_labels[np.searchsorted(edges, df["amount_minor"].to_numpy(), side="left")],
++            index=df.index,
++        ),
++        "time_of_day": pd.Series(
++            np.where((hour >= 1) & (hour <= 5), "night 01-05", "day 06-00"), index=df.index
++        ),
++    }
++
++
++def _metrics(
++    dimension: str, name: str, labels: pd.Series, scores: np.ndarray, flagged: np.ndarray
++) -> SliceMetrics:
++    truth = labels.to_numpy(dtype=int)
++    frauds = int(truth.sum())
++    genuine = int((truth == 0).sum())
++    alerts = int(flagged.sum())
++
++    measurable = len(truth) >= MIN_SLICE and frauds > 0
++    return SliceMetrics(
++        dimension=dimension,
++        slice=name,
++        n=len(truth),
++        frauds=frauds,
++        fraud_rate=float(truth.mean()) if len(truth) else 0.0,
++        alert_rate=alerts / len(truth) if len(truth) else 0.0,
++        tpr=float(flagged[truth == 1].mean()) if measurable else None,
++        fpr=float(flagged[truth == 0].mean()) if measurable and genuine else None,
++        precision=float(truth[flagged].mean()) if measurable and alerts else None,
++        pr_auc=(
++            float(average_precision_score(truth, scores)) if measurable and genuine else None
++        ),
++    )
++
++
++def _disparity(dimension: str, slices: list[SliceMetrics]) -> Disparity | None:
++    """Alert-rate spread across a dimension, over slices big enough to mean something."""
++    usable = [s for s in slices if s.n >= MIN_SLICE and s.alert_rate > 0]
++    if len(usable) < 2:
++        return None
++
++    high = max(usable, key=lambda s: s.alert_rate)
++    low = min(usable, key=lambda s: s.alert_rate)
++    return Disparity(
++        dimension=dimension,
++        ratio=high.alert_rate / low.alert_rate,
++        high=high.slice,
++        high_rate=high.alert_rate,
++        low=low.slice,
++        low_rate=low.alert_rate,
++    )
++
++
++def run(
++    df: pd.DataFrame,
++    max_disparity: float | None = None,
++    review_budget: float = REVIEW_BUDGET,
++    data_path: str = "",
++) -> FairnessReport:
++    features = candidate.build_features(df)
++    split = temporal_split(df)
++
++    model = candidate.fit_on_split(features, df, split.train.index)
++    scored = split.test
++    scores = candidate.score(model, features.loc[scored.index])
++    threshold = float(np.quantile(scores, 1.0 - review_budget))
++    flagged = scores >= threshold
++
++    slices: list[SliceMetrics] = []
++    disparities: list[Disparity] = []
++    for dimension, labels in slice_definitions(scored, split.train).items():
++        values = labels.to_numpy()
++        measured = []
++        for name in sorted(pd.unique(values), key=str):
++            mask = values == name
++            measured.append(
++                _metrics(
++                    dimension, str(name), scored.loc[mask, LABEL], scores[mask], flagged[mask]
++                )
++            )
++        slices.extend(measured)
++        spread = _disparity(dimension, measured)
++        if spread is not None:
++            disparities.append(spread)
++
++    return FairnessReport(
++        slices=tuple(slices),
++        disparities=tuple(disparities),
++        threshold=threshold,
++        window=split.window,
++        n_scored=len(scored),
++        fraud_rate=float(scored[LABEL].mean()),
++        data_path=data_path,
++        max_disparity=max_disparity,
++    )
++
++
++def _cell(value: float | None, as_percent: bool = True) -> str:
++    if value is None:
++        return "n/a"
++    return f"{value:.2%}" if as_percent else f"{value:.4f}"
++
++
++def format_markdown(report: FairnessReport) -> str:
++    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
++    lines = [
++        "# Fairness slice report -- fraud-v3 (point-in-time)",
++        "",
++        f"Generated {generated} by `ml/validation/fairness.py` (Gate 4).",
++        "",
++        f"- Data: `{report.data_path or 'synthetic transactions'}` -- synthetic throughout, "
++        "no cardholder data.",
++        f"- Scored window: {report.window}, {report.n_scored:,} transactions, "
++        f"{report.fraud_rate:.2%} fraud.",
++        f"- Operating point: top {REVIEW_BUDGET:.1%} of scores flagged for review "
++        f"(threshold {report.threshold:.4f}).",
++        f"- Slices smaller than {MIN_SLICE} rows, or with no fraud in them, are listed "
++        "with metrics blanked rather than dropped.",
++        "",
++        "Tessera holds no protected-class attributes on a transaction. The slices below are "
++        "proxies available on the authorization record; geography and ticket size are the ones "
++        "that correlate with protected characteristics, so read those first. A statutory "
++        "adverse-impact analysis needs attributes we deliberately do not hold and is run by "
++        "Compliance separately.",
++        "",
++        "## Alert-rate disparity by dimension",
++        "",
++        "| dimension | ratio | highest | rate | lowest | rate |",
++        "|---|---:|---|---:|---|---:|",
++    ]
++    for d in sorted(report.disparities, key=lambda d: d.ratio, reverse=True):
++        lines.append(
++            f"| {d.dimension} | {d.ratio:.2f}x | {d.high} | {d.high_rate:.2%} | "
++            f"{d.low} | {d.low_rate:.2%} |"
++        )
++
++    for dimension in dict.fromkeys(s.dimension for s in report.slices):
++        lines += [
++            "",
++            f"## {dimension}",
++            "",
++            "| slice | n | fraud rate | alert rate | TPR | FPR | precision | PR-AUC |",
++            "|---|---:|---:|---:|---:|---:|---:|---:|",
++        ]
++        for s in (s for s in report.slices if s.dimension == dimension):
++            lines.append(
++                f"| {s.slice} | {s.n:,} | {s.fraud_rate:.2%} | {s.alert_rate:.2%} | "
++                f"{_cell(s.tpr)} | {_cell(s.fpr)} | {_cell(s.precision)} | "
++                f"{_cell(s.pr_auc, as_percent=False)} |"
++            )
++
++    lines += [
++        "",
++        "## Reading this",
++        "",
++        "A slice whose alert rate is far above its fraud rate is being over-reviewed: the "
++        "queue spends its budget there and the cardholders in it absorb the friction. A slice "
++        "whose TPR is far below the others is being under-protected. Both are findings even "
++        "when aggregate PR-AUC is healthy, which is the whole reason this gate reports per "
++        "slice.",
++        "",
++    ]
++    return "\n".join(lines)
++
++
++def format_summary(report: FairnessReport) -> str:
++    lines = [
++        "Gate 4 -- fairness slices",
++        f"  scored window: {report.window}  ({report.n_scored:,} rows)",
++        f"  operating point: top {REVIEW_BUDGET:.1%} of scores (threshold {report.threshold:.4f})",
++        f"  slices measured: {len(report.slices)} across {len(report.disparities)} dimensions",
++        "",
++    ]
++    for d in sorted(report.disparities, key=lambda d: d.ratio, reverse=True):
++        lines.append(
++            f"  {d.dimension:<16} alert-rate spread {d.ratio:.2f}x  "
++            f"({d.high} {d.high_rate:.2%} vs {d.low} {d.low_rate:.2%})"
++        )
++
++    lines.append("")
++    if report.max_disparity is None:
++        lines.append("  PASS -- report-only gate (pass --max-disparity to make it blocking).")
++    elif report.passed:
++        lines.append(f"  PASS -- every dimension within {report.max_disparity:.2f}x.")
++    else:
++        over = [d for d in report.disparities if d.ratio > report.max_disparity]
++        lines.append(
++            f"  FAIL -- {', '.join(f'{d.dimension} {d.ratio:.2f}x' for d in over)} "
++            f"above {report.max_disparity:.2f}x."
++        )
++    return "\n".join(lines)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description="Gate 4: fairness slice report.")
++    add_data_argument(parser)
++    parser.add_argument(
++        "--report",
++        type=Path,
++        default=DEFAULT_REPORT,
++        help=f"markdown report to write (default {DEFAULT_REPORT})",
++    )
++    parser.add_argument(
++        "--max-disparity",
++        type=float,
++        default=None,
++        help="fail when any dimension's alert-rate ratio exceeds this (default: report only)",
++    )
++    args = parser.parse_args(argv)
++
++    data = args.data if args.data is not None else None
++    df = load_transactions(data)
++    shown = str(data) if data else str((ROOT / "ml/data/transactions.parquet").relative_to(ROOT))
++    report = run(df, max_disparity=args.max_disparity, data_path=shown)
++
++    args.report.parent.mkdir(parents=True, exist_ok=True)
++    args.report.write_text(format_markdown(report), encoding="utf-8")
++    print(format_summary(report))
++    print(f"\n  report written to {args.report}")
++
++    if not report.passed:
++        worst = report.worst
++        print(f"\n::error::alert-rate disparity {worst.ratio:.2f}x on {worst.dimension}")
++        return 1
++    return 0
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(main())
+diff --git a/ml/validation/leakage.py b/ml/validation/leakage.py
+new file mode 100644
+index 0000000..52b44e5
+--- /dev/null
++++ b/ml/validation/leakage.py
+@@ -0,0 +1,282 @@
++"""
++Gate 1 -- point-in-time correctness.
++
++    uv run python -m ml.validation.leakage --fail-on-leak
++
++A feature is point-in-time correct when its value for a row depends only on
++what was knowable when that row was scored. That is a property you can test by
++*taking the future away* and checking the answer does not move:
++
++1. **label permutation** -- shuffle `is_fraud`. Any feature whose values move
++   is reading the label.
++2. **outcome censoring** -- hide chargebacks filed on or after the cutoff, the
++   way reality hides them (disputes land 20-89 days late, median 54). Any
++   feature whose values move for rows *before* the cutoff was being told the
++   answer by a dispute that had not been filed yet.
++3. **future rows** -- delete every transaction from the cutoff onwards. Any
++   historical aggregate whose values move for the surviving rows was
++   averaging over its own future.
++
++Check 2 is the one that catches the failure this gate was written for.
++Notebook 01's `card_chargeback_rate` is a whole-table
++`groupby(...).notna().mean()`: censoring chargebacks moves 27% of training
++rows, because it was never a behavioural signal at all -- `chargeback_filed_at`
++is non-null on fraud rows and nowhere else. Offline that bought +0.128 AUC;
++shadow gave it all back and more (TESS-2310). The point-in-time
++implementation in `ml/features/aggregates.py` is invariant under all three.
++
++Check 3 is run against historical aggregates only. `ml/features/base.py` is
++row-wise by construction with one documented exception,
++`amount_zscore_within_mcc`, which standardises against a whole-frame mean and
++standard deviation. It touches no outcome column, so it is not leakage in the
++sense this gate exists to catch, but it is frame-dependent and the gate says
++so rather than quietly passing it. Before v3 ships those two moments should be
++fit on the training window and frozen.
++"""
++
++from __future__ import annotations
++
++import argparse
++from collections.abc import Callable
++from dataclasses import dataclass
++
++import numpy as np
++import pandas as pd
++
++from ml.features import aggregates, base
++from ml.validation.dataset import LABEL, add_data_argument, load_transactions, temporal_split
++
++TOLERANCE = 1e-12
++PERMUTATION_SEED = 20262310
++
++# Frame-level statistics of observable fields. Documented in base.py, excluded
++# from the future-rows check by name so the exclusion is visible in the report
++# rather than buried in a predicate.
++FRAME_STATISTICS = ("amount_zscore_within_mcc",)
++
++
++@dataclass(frozen=True)
++class FeatureUnderTest:
++    """A feature bound to a frame, ready to be recomputed under censoring."""
++
++    name: str
++    compute: Callable[[pd.DataFrame], pd.Series]
++    historical: bool
++
++
++@dataclass(frozen=True)
++class CheckResult:
++    feature: str
++    check: str
++    leaked: bool
++    rows_compared: int
++    rows_changed: int
++    max_abs_diff: float
++    detail: str
++
++
++@dataclass(frozen=True)
++class LeakageReport:
++    cut: pd.Timestamp
++    results: tuple[CheckResult, ...]
++    exempt_from_future_rows: tuple[str, ...]
++
++    @property
++    def leaks(self) -> tuple[CheckResult, ...]:
++        return tuple(r for r in self.results if r.leaked)
++
++    @property
++    def clean(self) -> bool:
++        return not self.leaks
++
++
++def production_features() -> tuple[FeatureUnderTest, ...]:
++    """Every feature a fraud-v3 training table is built from."""
++    row_wise = [
++        FeatureUnderTest(name, fn, historical=False) for name, fn in base.BASE_FEATURES.items()
++    ]
++    historical = [
++        FeatureUnderTest(name, _as_of_own_timestamp(fn), historical=True)
++        for name, fn in aggregates.AGGREGATE_FEATURES.items()
++    ]
++    return (*row_wise, *historical)
++
++
++def _as_of_own_timestamp(fn: Callable[..., pd.Series]) -> Callable[[pd.DataFrame], pd.Series]:
++    """Bind an aggregate to the training convention: each row as of its own scoring instant."""
++    return lambda frame: fn(frame, frame["timestamp"])
++
++
++def _difference(
++    reference: pd.Series, recomputed: pd.Series, rows: pd.Index
++) -> tuple[int, float]:
++    """Rows whose value moved, and by how much, over `rows`."""
++    left = reference.loc[rows].to_numpy(dtype=float)
++    right = recomputed.loc[rows].to_numpy(dtype=float)
++    both_missing = np.isnan(left) & np.isnan(right)
++    delta = np.where(both_missing, 0.0, np.abs(np.nan_to_num(left) - np.nan_to_num(right)))
++    changed = delta > TOLERANCE
++    return int(changed.sum()), float(delta.max()) if delta.size else 0.0
++
++
++def _result(
++    feature: str, check: str, reference: pd.Series, recomputed: pd.Series, rows: pd.Index, why: str
++) -> CheckResult:
++    changed, worst = _difference(reference, recomputed, rows)
++    detail = (
++        f"{changed:,} of {len(rows):,} rows move when {why} (max |delta| {worst:.6f})"
++        if changed
++        else f"unchanged across {len(rows):,} rows when {why}"
++    )
++    return CheckResult(
++        feature=feature,
++        check=check,
++        leaked=changed > 0,
++        rows_compared=len(rows),
++        rows_changed=changed,
++        max_abs_diff=worst,
++        detail=detail,
++    )
++
++
++def _permuted_labels(df: pd.DataFrame) -> pd.DataFrame:
++    permuted = df.copy()
++    rng = np.random.default_rng(PERMUTATION_SEED)
++    permuted[LABEL] = rng.permutation(permuted[LABEL].to_numpy())
++    return permuted
++
++
++def _censored_outcomes(df: pd.DataFrame, cut: pd.Timestamp) -> pd.DataFrame:
++    """The frame as it looked at `cut`: disputes not yet filed are not yet known."""
++    censored = df.copy()
++    not_yet_filed = censored["chargeback_filed_at"] >= cut
++    censored.loc[not_yet_filed, "chargeback_filed_at"] = pd.NaT
++    return censored
++
++
++def check_feature(feature: FeatureUnderTest, df: pd.DataFrame, cut: pd.Timestamp) -> list[CheckResult]:
++    """Run every applicable check against one feature."""
++    reference = feature.compute(df)
++    observable = df.index[df["timestamp"] <= cut]
++    results: list[CheckResult] = []
++
++    if LABEL in df.columns:
++        results.append(
++            _result(
++                feature.name,
++                "label_permutation",
++                reference,
++                feature.compute(_permuted_labels(df)),
++                df.index,
++                f"{LABEL} is permuted",
++            )
++        )
++
++    if "chargeback_filed_at" in df.columns:
++        results.append(
++            _result(
++                feature.name,
++                "outcome_censoring",
++                reference,
++                feature.compute(_censored_outcomes(df, cut)),
++                observable,
++                f"chargebacks filed on or after {cut.date()} are censored",
++            )
++        )
++
++    if feature.historical:
++        truncated = df.loc[observable]
++        results.append(
++            _result(
++                feature.name,
++                "future_rows",
++                reference,
++                feature.compute(truncated),
++                observable,
++                f"transactions from {cut.date()} onwards are deleted",
++            )
++        )
++
++    return results
++
++
++def run(
++    df: pd.DataFrame,
++    cut: pd.Timestamp | None = None,
++    features: tuple[FeatureUnderTest, ...] | None = None,
++) -> LeakageReport:
++    """Check every feature. `cut` defaults to the shared temporal split point."""
++    features = production_features() if features is None else features
++    cut = temporal_split(df).cut if cut is None else cut
++
++    results: list[CheckResult] = []
++    for feature in features:
++        try:
++            results.extend(check_feature(feature, df, cut))
++        except Exception as exc:  # a feature that cannot be recomputed cannot be cleared
++            results.append(
++                CheckResult(
++                    feature=feature.name,
++                    check="recompute",
++                    leaked=True,
++                    rows_compared=len(df),
++                    rows_changed=len(df),
++                    max_abs_diff=float("nan"),
++                    detail=f"raised {type(exc).__name__}: {exc}",
++                )
++            )
++
++    exempt = tuple(f.name for f in features if not f.historical and f.name in FRAME_STATISTICS)
++    return LeakageReport(cut=cut, results=tuple(results), exempt_from_future_rows=exempt)
++
++
++def format_report(report: LeakageReport) -> str:
++    lines = [
++        "Gate 1 -- point-in-time correctness",
++        f"  cutoff: {report.cut.isoformat()}",
++        "",
++        f"  {'feature':<28} {'check':<20} {'verdict':<8} detail",
++    ]
++    for result in report.results:
++        verdict = "LEAK" if result.leaked else "ok"
++        lines.append(f"  {result.feature:<28} {result.check:<20} {verdict:<8} {result.detail}")
++
++    if report.exempt_from_future_rows:
++        lines += [
++            "",
++            "  not checked for future-row sensitivity (whole-frame statistics of "
++            "observable fields, no outcome columns read):",
++            f"    {', '.join(report.exempt_from_future_rows)}",
++            "    -- fit these moments on the training window and freeze them before v3 ships.",
++        ]
++
++    lines.append("")
++    if report.clean:
++        lines.append(f"  PASS -- {len(report.results)} checks, no feature moved.")
++    else:
++        lines.append(f"  FAIL -- {len(report.leaks)} of {len(report.results)} checks found leakage:")
++        lines += [f"    {r.feature}: {r.check}" for r in report.leaks]
++    return "\n".join(lines)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description="Gate 1: point-in-time correctness.")
++    add_data_argument(parser)
++    parser.add_argument(
++        "--fail-on-leak",
++        action="store_true",
++        help="exit non-zero when any feature depends on information from after it was scored",
++    )
++    args = parser.parse_args(argv)
++
++    report = run(load_transactions(args.data))
++    print(format_report(report))
++
++    if report.leaks and args.fail_on_leak:
++        print("\n::error::point-in-time violation -- every number downstream of this is invalid")
++        return 1
++    return 0
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(main())
+diff --git a/ml/validation/performance.py b/ml/validation/performance.py
+new file mode 100644
+index 0000000..be3d1ad
+--- /dev/null
++++ b/ml/validation/performance.py
+@@ -0,0 +1,112 @@
++"""
++Gate 2 -- performance floor on a temporal split.
++
++    uv run python -m ml.validation.performance --min-pr-auc 0.15
++
++PR-AUC, not AUC. Fraud is a 3.5%-prevalence problem; ROC-AUC is dominated by
++the majority class and moves far too little when a model's precision collapses
++in the alert queue. The floor is the champion's recorded PR-AUC on the same
++window, minus a small tolerance -- a candidate below it is not a candidate.
++
++The floor is deliberately low relative to fraud-v3's *offline* 0.358, because
++0.358 was leakage. The honest point-in-time number for the same feature set is
++0.16, and the gate exists to stop anything that only clears the bar by knowing
++the future: Gate 1 runs first and the two are read together -- a big number
++here plus a leak there means the number is fiction, which is exactly what the
++shadow run found (TESS-2310).
++"""
++
++from __future__ import annotations
++
++import argparse
++from dataclasses import dataclass
++
++import pandas as pd
++from sklearn.metrics import average_precision_score, roc_auc_score
++
++from ml.validation import candidate
++from ml.validation.dataset import LABEL, add_data_argument, load_transactions, temporal_split
++
++# fraud-v2 in production on the 2026-07-05 -> 2026-08-27 window.
++CHAMPION_PR_AUC = 0.164
++CHAMPION_AUC = 0.7782
++
++DEFAULT_MIN_PR_AUC = 0.15
++
++
++@dataclass(frozen=True)
++class PerformanceReport:
++    pr_auc: float
++    auc: float
++    n_train: int
++    n_test: int
++    fraud_rate_test: float
++    window: str
++    minimum: float
++
++    @property
++    def passed(self) -> bool:
++        return self.pr_auc >= self.minimum
++
++
++def run(df: pd.DataFrame, minimum: float = DEFAULT_MIN_PR_AUC) -> PerformanceReport:
++    features = candidate.build_features(df)
++    split = temporal_split(df)
++
++    model = candidate.fit_on_split(features, df, split.train.index)
++    scores = candidate.score(model, features.loc[split.test.index])
++    labels = split.test[LABEL]
++
++    return PerformanceReport(
++        pr_auc=float(average_precision_score(labels, scores)),
++        auc=float(roc_auc_score(labels, scores)),
++        n_train=len(split.train),
++        n_test=len(split.test),
++        fraud_rate_test=float(labels.mean()),
++        window=split.window,
++        minimum=minimum,
++    )
++
++
++def format_report(report: PerformanceReport) -> str:
++    verdict = "PASS" if report.passed else "FAIL"
++    return "\n".join(
++        [
++            "Gate 2 -- performance floor",
++            f"  scored window : {report.window}  "
++            f"({report.n_test:,} rows, {report.fraud_rate_test:.2%} fraud)",
++            f"  trained on    : {report.n_train:,} rows",
++            f"  PR-AUC        : {report.pr_auc:.4f}   (floor {report.minimum:.4f}, "
++            f"champion {CHAMPION_PR_AUC:.4f})",
++            f"  ROC-AUC       : {report.auc:.4f}   (champion {CHAMPION_AUC:.4f})",
++            "",
++            f"  {verdict} -- PR-AUC {report.pr_auc:.4f} "
++            f"{'>=' if report.passed else '<'} {report.minimum:.4f}",
++        ]
++    )
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description="Gate 2: performance floor on a temporal split.")
++    add_data_argument(parser)
++    parser.add_argument(
++        "--min-pr-auc",
++        type=float,
++        default=DEFAULT_MIN_PR_AUC,
++        help=f"PR-AUC the candidate must clear on the scored window (default {DEFAULT_MIN_PR_AUC})",
++    )
++    args = parser.parse_args(argv)
++
++    report = run(load_transactions(args.data), minimum=args.min_pr_auc)
++    print(format_report(report))
++
++    if not report.passed:
++        print(
++            f"\n::error::PR-AUC {report.pr_auc:.4f} is below the floor {report.minimum:.4f}"
++        )
++        return 1
++    return 0
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(main())
+diff --git a/ml/validation/tests/conftest.py b/ml/validation/tests/conftest.py
+new file mode 100644
+index 0000000..f30e827
+--- /dev/null
++++ b/ml/validation/tests/conftest.py
+@@ -0,0 +1,40 @@
++"""
++Fixtures for the gate tests.
++
++Two data sources, deliberately: a small synthetic table written once per
++session for the fast tests, and the checked-in table for the handful of tests
++that assert the numbers from the TESS-2310 investigation still reproduce.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++import pandas as pd
++import pytest
++
++from ml.data.generate import generate
++from ml.validation.dataset import DEFAULT_DATA, load_transactions
++
++SMALL_ROWS = 20_000
++
++
++@pytest.fixture(scope="session")
++def small_data_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
++    """A small synthetic table on disk, for exercising the gates' CLIs."""
++    path = tmp_path_factory.mktemp("validation-data") / "transactions.parquet"
++    generate(SMALL_ROWS).to_parquet(path, index=False)
++    return path
++
++
++@pytest.fixture(scope="session")
++def small_data(small_data_path: Path) -> pd.DataFrame:
++    return load_transactions(small_data_path)
++
++
++@pytest.fixture(scope="session")
++def repo_data() -> pd.DataFrame:
++    """The table the shadow investigation ran on."""
++    if not DEFAULT_DATA.exists() and not DEFAULT_DATA.with_suffix(".csv").exists():
++        pytest.skip("ml/data/transactions.parquet not generated")
++    return load_transactions()
+diff --git a/ml/validation/tests/negative_fixtures.py b/ml/validation/tests/negative_fixtures.py
+new file mode 100644
+index 0000000..50058c9
+--- /dev/null
++++ b/ml/validation/tests/negative_fixtures.py
+@@ -0,0 +1,56 @@
++"""
++Known-bad feature definitions, kept so the gates can be shown to catch them.
++
++**Nothing in this module may be imported by anything outside
++`ml/validation/tests/`.** These are negative fixtures: a gate that cannot fail
++has not been tested, and the cheapest way to keep Gate 1 honest is to keep the
++exact definition that got past everyone the first time.
++
++`card_chargeback_rate_whole_table` is `ml/notebooks/01_fraud_exploration.ipynb`
++cell 8, unchanged apart from the `as_of` parameter it has to accept in order
++to be checked at all -- which it then ignores, because ignoring the as-of cut
++is the entire defect. On the synthetic table it is non-zero for 27.43% of
++training rows against the point-in-time feature's 3.44%, and it bought +0.128
++AUC offline that turned into -0.079 against the champion in shadow
++(TESS-2310).
++"""
++
++from __future__ import annotations
++
++import pandas as pd
++
++from ml.validation.leakage import FeatureUnderTest
++
++NOTEBOOK_SOURCE = "ml/notebooks/01_fraud_exploration.ipynb, cell 8"
++
++
++def card_chargeback_rate_whole_table(df: pd.DataFrame, as_of: object = None) -> pd.Series:
++    """
++    LEAKY. The whole-table chargeback rate per card, with no as-of cut.
++
++    Every row is handed every chargeback on its card, including the ones filed
++    after it and the one filed against it. Since `chargeback_filed_at` is
++    non-null on fraud rows and nowhere else, this is the label with a
++    behavioural-sounding name.
++    """
++    per_card = df.groupby("card_token")["chargeback_filed_at"].apply(lambda s: s.notna().mean())
++    return df["card_token"].map(per_card).fillna(0.0).rename("card_chargeback_rate")
++
++
++def reads_the_label(df: pd.DataFrame) -> pd.Series:
++    """LEAKY, and not subtly: the label itself, as a float."""
++    return df["is_fraud"].astype(float).rename("reads_the_label")
++
++
++LEAKY_AGGREGATES = {"card_chargeback_rate": card_chargeback_rate_whole_table}
++
++
++def notebook_feature_set() -> tuple[FeatureUnderTest, ...]:
++    """The v3 candidate as notebook 01 defined it -- what Gate 1 must reject."""
++    return (
++        FeatureUnderTest(
++            name="card_chargeback_rate",
++            compute=lambda frame: card_chargeback_rate_whole_table(frame, frame["timestamp"]),
++            historical=True,
++        ),
++    )
+diff --git a/ml/validation/tests/test_drift.py b/ml/validation/tests/test_drift.py
+new file mode 100644
+index 0000000..4965c0c
+--- /dev/null
++++ b/ml/validation/tests/test_drift.py
+@@ -0,0 +1,77 @@
++"""Gate 3 tests."""
++
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from ml.validation import drift
++
++
++@pytest.fixture(scope="module")
++def repo_report(repo_data):
++    return drift.run(repo_data)
++
++
++def test_identical_distributions_have_no_drift():
++    values = np.random.default_rng(0).normal(size=5_000)
++    psi, _ = drift.population_stability_index(values, values.copy())
++    assert psi == pytest.approx(0.0, abs=1e-9)
++
++
++def test_a_shifted_distribution_breaches_the_ceiling():
++    rng = np.random.default_rng(0)
++    reference = rng.normal(size=5_000)
++    current = rng.normal(loc=1.5, size=5_000)
++    psi, _ = drift.population_stability_index(reference, current)
++    assert psi > drift.DEFAULT_MAX_PSI
++
++
++def test_a_spike_at_zero_is_measured_rather_than_swallowed():
++    """
++    The failure mode this binning exists to avoid: a feature that is mostly
++    zero, whose non-zero share quadruples, must not report 0.000 drift.
++    """
++    reference = np.concatenate([np.zeros(9_600), np.full(400, 0.5)])
++    current = np.concatenate([np.zeros(8_600), np.full(1_400, 0.5)])
++    psi, bins = drift.population_stability_index(reference, current)
++    assert bins >= 2
++    assert psi > 0.1
++
++
++def test_a_constant_feature_does_not_blow_up():
++    psi, bins = drift.population_stability_index(np.ones(100), np.ones(100))
++    assert (psi, bins) == (0.0, 1)
++
++
++def test_every_shipped_feature_is_measured(repo_report):
++    from ml.validation.candidate import FEATURE_ORDER
++
++    assert {f.feature for f in repo_report.features} == set(FEATURE_ORDER)
++
++
++def test_the_repo_data_passes_the_ci_ceiling(repo_report):
++    assert repo_report.passed
++    assert repo_report.worst.psi <= drift.DEFAULT_MAX_PSI
++
++
++def test_card_history_is_the_feature_that_moves(repo_report):
++    """
++    Cards accumulate history as the timeline runs, so the point-in-time
++    chargeback rate is non-zero four times as often in the scored window as in
++    training. That is a real cold-start effect, not a population change, and
++    the gate should surface it rather than hide it.
++    """
++    assert repo_report.worst.feature == "card_chargeback_rate"
++    assert repo_report.worst.psi > 0.1
++    assert repo_report.worst.band == "watch"
++
++
++def test_cli_fails_when_the_ceiling_is_impossible(small_data_path, capsys):
++    assert drift.main(["--data", str(small_data_path), "--max-psi", "0.0"]) == 1
++    assert "PSI above" in capsys.readouterr().out
++
++
++def test_cli_passes_at_the_ci_ceiling(small_data_path, capsys):
++    assert drift.main(["--data", str(small_data_path), "--max-psi", "0.25"]) == 0
++    assert "PASS" in capsys.readouterr().out
+diff --git a/ml/validation/tests/test_fairness.py b/ml/validation/tests/test_fairness.py
+new file mode 100644
+index 0000000..ab770f4
+--- /dev/null
++++ b/ml/validation/tests/test_fairness.py
+@@ -0,0 +1,81 @@
++"""Gate 4 tests."""
++
++from __future__ import annotations
++
++import pytest
++
++from ml.validation import fairness
++
++
++@pytest.fixture(scope="module")
++def report(small_data):
++    return fairness.run(small_data)
++
++
++def test_every_dimension_is_sliced(report):
++    assert {s.dimension for s in report.slices} == {
++        "geography",
++        "cross_border",
++        "mcc_risk_tier",
++        "amount_band",
++        "time_of_day",
++    }
++
++
++def test_rates_are_reported_per_slice_not_in_aggregate(report):
++    assert len(report.slices) > len({s.dimension for s in report.slices})
++    for measured in report.slices:
++        assert 0.0 <= measured.alert_rate <= 1.0
++        assert 0.0 <= measured.fraud_rate <= 1.0
++
++
++def test_the_operating_point_matches_the_review_budget(report, small_data):
++    """Roughly the top 1% of the scored window, however the slices fall."""
++    scored = sum(s.n for s in report.slices if s.dimension == "geography")
++    alerts = sum(s.n * s.alert_rate for s in report.slices if s.dimension == "geography")
++    assert alerts / scored == pytest.approx(fairness.REVIEW_BUDGET, abs=2e-3)
++
++
++def test_slices_too_small_to_measure_are_kept_but_blanked(report):
++    for measured in report.slices:
++        if not measured.measurable:
++            assert measured.tpr is None and measured.pr_auc is None
++
++
++def test_disparity_is_computed_per_dimension(report):
++    assert {d.dimension for d in report.disparities} <= {s.dimension for s in report.slices}
++    for spread in report.disparities:
++        assert spread.ratio >= 1.0
++
++
++def test_the_report_is_written_as_markdown(small_data_path, tmp_path, capsys):
++    destination = tmp_path / "nested" / "fairness.md"
++    assert fairness.main(["--data", str(small_data_path), "--report", str(destination)]) == 0
++
++    written = destination.read_text(encoding="utf-8")
++    assert written.startswith("# Fairness slice report")
++    for dimension in ("geography", "amount_band", "time_of_day", "mcc_risk_tier"):
++        assert f"## {dimension}" in written
++    assert "no protected-class attributes" in written
++    assert "report written to" in capsys.readouterr().out
++
++
++def test_the_gate_reports_without_blocking_by_default(report):
++    assert report.max_disparity is None
++    assert report.passed
++
++
++def test_max_disparity_makes_it_blocking(small_data_path, tmp_path, capsys):
++    """A fraud model concentrates its alerts by design; 1.0x is unreachable."""
++    exit_code = fairness.main(
++        [
++            "--data",
++            str(small_data_path),
++            "--report",
++            str(tmp_path / "fairness.md"),
++            "--max-disparity",
++            "1.0",
++        ]
++    )
++    assert exit_code == 1
++    assert "alert-rate disparity" in capsys.readouterr().out
+diff --git a/ml/validation/tests/test_leakage.py b/ml/validation/tests/test_leakage.py
+new file mode 100644
+index 0000000..d4b3ccc
+--- /dev/null
++++ b/ml/validation/tests/test_leakage.py
+@@ -0,0 +1,143 @@
++"""
++Gate 1 tests.
++
++Half of these check that the shipped feature set passes. The other half check
++that the gate fails on `negative_fixtures.card_chargeback_rate_whole_table` --
++the definition from notebook 01 that reached shadow. A gate nobody has watched
++fail is a gate nobody should trust.
++"""
++
++from __future__ import annotations
++
++import pandas as pd
++import pytest
++
++from ml.features.aggregates import card_chargeback_rate
++from ml.validation import leakage
++from ml.validation.dataset import temporal_split
++from ml.validation.tests.negative_fixtures import (
++    NOTEBOOK_SOURCE,
++    card_chargeback_rate_whole_table,
++    notebook_feature_set,
++    reads_the_label,
++)
++
++
++def _verdicts(results: list[leakage.CheckResult]) -> dict[str, bool]:
++    return {result.check: result.leaked for result in results}
++
++
++# --- the shipped feature set ------------------------------------------------
++
++
++def test_every_shipped_feature_passes_every_check(small_data):
++    report = leakage.run(small_data)
++    assert report.clean, [r.detail for r in report.leaks]
++
++
++def test_the_point_in_time_aggregate_is_checked_for_future_rows(small_data):
++    report = leakage.run(small_data)
++    checks = {(r.feature, r.check) for r in report.results}
++    assert ("card_chargeback_rate", "future_rows") in checks
++    assert ("card_chargeback_rate", "outcome_censoring") in checks
++
++
++def test_gate_passes_on_the_shipped_feature_set(small_data_path, capsys):
++    assert leakage.main(["--fail-on-leak", "--data", str(small_data_path)]) == 0
++    assert "PASS" in capsys.readouterr().out
++
++
++def test_frame_statistics_are_named_rather_than_silently_skipped(small_data):
++    """
++    base.amount_zscore_within_mcc standardises against a whole-frame mean, so
++    it is exempt from the future-rows check. The report has to say so.
++    """
++    report = leakage.run(small_data)
++    assert "amount_zscore_within_mcc" in report.exempt_from_future_rows
++    assert "amount_zscore_within_mcc" in leakage.format_report(report)
++
++
++# --- the notebook definition ------------------------------------------------
++
++
++def test_the_notebook_definition_is_caught_by_outcome_censoring(small_data):
++    feature = notebook_feature_set()[0]
++    results = leakage.check_feature(feature, small_data, temporal_split(small_data).cut)
++    assert _verdicts(results)["outcome_censoring"] is True
++
++
++def test_the_notebook_definition_is_caught_by_future_rows(small_data):
++    feature = notebook_feature_set()[0]
++    results = leakage.check_feature(feature, small_data, temporal_split(small_data).cut)
++    assert _verdicts(results)["future_rows"] is True
++
++
++def test_the_notebook_definition_survives_label_permutation(small_data):
++    """
++    It reads `chargeback_filed_at`, not `is_fraud`, so the cheap check clears
++    it. That is why the censoring check exists -- and why this gate runs all
++    three rather than the obvious one.
++    """
++    feature = notebook_feature_set()[0]
++    results = leakage.check_feature(feature, small_data, temporal_split(small_data).cut)
++    assert _verdicts(results)["label_permutation"] is False
++
++
++def test_gate_one_fails_on_the_notebook_definition(small_data_path, monkeypatch, capsys):
++    """The contract from model-validation.yml: --fail-on-leak must exit non-zero."""
++    monkeypatch.setattr(leakage, "production_features", notebook_feature_set)
++
++    assert leakage.main(["--fail-on-leak", "--data", str(small_data_path)]) == 1
++    output = capsys.readouterr().out
++    assert "LEAK" in output
++    assert "card_chargeback_rate" in output
++
++
++def test_without_the_flag_a_leak_is_reported_but_not_blocking(small_data_path, monkeypatch):
++    """`--fail-on-leak` is what makes it a gate; without it the module reports."""
++    monkeypatch.setattr(leakage, "production_features", notebook_feature_set)
++    assert leakage.main(["--data", str(small_data_path)]) == 0
++
++
++def test_label_permutation_catches_a_feature_that_reads_the_label(small_data):
++    feature = leakage.FeatureUnderTest("reads_the_label", reads_the_label, historical=False)
++    results = leakage.check_feature(feature, small_data, temporal_split(small_data).cut)
++    assert _verdicts(results)["label_permutation"] is True
++
++
++def test_a_feature_that_cannot_be_recomputed_is_not_cleared(small_data):
++    def explodes(frame: pd.DataFrame) -> pd.Series:
++        raise RuntimeError("no")
++
++    report = leakage.run(
++        small_data, features=(leakage.FeatureUnderTest("explodes", explodes, historical=False),)
++    )
++    assert not report.clean
++    assert "RuntimeError" in report.leaks[0].detail
++
++
++# --- the investigation, as a regression test --------------------------------
++
++
++def test_the_two_definitions_still_diverge_exactly_as_investigated(repo_data):
++    """
++    The numbers TESS-2310 turned on, pinned: the shadow report's
++    `training_nonzero_share` of 0.2743 was the leaky feature on training rows,
++    and its `shadow_nonzero_share` of 0.1419 was the point-in-time feature on
++    the scored window. Two different features, one name.
++    """
++    split = temporal_split(repo_data)
++    leaky = card_chargeback_rate_whole_table(repo_data)
++    point_in_time = card_chargeback_rate(repo_data, repo_data["timestamp"])
++
++    assert (leaky.loc[split.train.index] > 0).mean() == pytest.approx(0.2743, abs=5e-5)
++    assert (point_in_time.loc[split.train.index] > 0).mean() == pytest.approx(0.0344, abs=5e-5)
++    assert (point_in_time.loc[split.test.index] > 0).mean() == pytest.approx(0.1419, abs=5e-5)
++    assert NOTEBOOK_SOURCE.startswith("ml/notebooks/01_fraud_exploration.ipynb")
++
++
++def test_the_leaky_feature_is_the_label_in_disguise(repo_data):
++    """`chargeback_filed_at` is non-null on fraud rows and nowhere else."""
++    disputed = repo_data["chargeback_filed_at"].notna()
++    assert repo_data.loc[disputed, "is_fraud"].eq(1).all()
++    assert repo_data.loc[disputed, "is_fraud"].sum() < repo_data["is_fraud"].sum()
+diff --git a/ml/validation/tests/test_performance.py b/ml/validation/tests/test_performance.py
+new file mode 100644
+index 0000000..56951ac
+--- /dev/null
++++ b/ml/validation/tests/test_performance.py
+@@ -0,0 +1,52 @@
++"""Gate 2 tests."""
++
++from __future__ import annotations
++
++import pytest
++
++from ml.validation import performance
++from ml.validation.dataset import temporal_split
++
++
++@pytest.fixture(scope="module")
++def repo_report(repo_data):
++    """One fit, reused -- this is the expensive fixture in the suite."""
++    return performance.run(repo_data)
++
++
++def test_the_candidate_clears_the_ci_floor(repo_report):
++    assert repo_report.passed
++    assert repo_report.pr_auc >= performance.DEFAULT_MIN_PR_AUC
++
++
++def test_the_honest_number_is_nowhere_near_the_offline_claim(repo_report):
++    """
++    Notebook 01 recorded PR-AUC 0.358 for this feature set. That number was
++    leakage; point-in-time it is around 0.16, level with the champion. If this
++    assertion ever fails upwards, a leak has come back.
++    """
++    assert repo_report.pr_auc < 0.25
++    assert repo_report.auc < 0.85
++
++
++def test_metrics_are_reported_against_the_scored_window(repo_report, repo_data):
++    split = temporal_split(repo_data)
++    assert repo_report.n_train == len(split.train)
++    assert repo_report.n_test == len(split.test)
++    assert repo_report.window == split.window
++
++
++def test_a_floor_above_the_score_fails_the_gate(small_data):
++    report = performance.run(small_data, minimum=0.99)
++    assert not report.passed
++    assert "FAIL" in performance.format_report(report)
++
++
++def test_cli_exits_non_zero_below_the_floor(small_data_path, capsys):
++    assert performance.main(["--data", str(small_data_path), "--min-pr-auc", "0.99"]) == 1
++    assert "below the floor" in capsys.readouterr().out
++
++
++def test_cli_exits_zero_above_the_floor(small_data_path, capsys):
++    assert performance.main(["--data", str(small_data_path), "--min-pr-auc", "0.0"]) == 0
++    assert "PASS" in capsys.readouterr().out
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,662 @@
+From 27a8b2306e3cb5791c97554a9b69b8e2e83f0432 Mon Sep 17 00:00:00 2001
+From: Tessera CI <ci@tessera.test>
+Date: Sun, 20 Sep 2026 13:56:51 -0400
+Subject: [PATCH] fix(risk): restore the fraud-model cache TTL and bound the
+ call policy
+
+INC-4412. CACHE_TTL_SECONDS was set to 0 in b745a5a, shipped in the 14:02
+rollout recorded against 4b56e1d. The response cache was absorbing ~77% of
+scoring calls, so disabling it put ~420 rps on a dependency with ~155 rps of
+capacity. Retries without backoff amplified that to ~1120 rps and the system
+settled into a metastable bad state: 70.8% authorization success, p99 pinned
+at the 8.5s edge budget, no self-recovery.
+
+Root cause:
+  - CACHE_TTL_SECONDS 0 -> 300.
+
+Contributing factors closed here:
+  - REQUEST_TIMEOUT_SECONDS None -> 1.0. An unbounded attempt consumes the
+    whole edge budget, which is why p99 sat at 8.5s.
+  - RETRY_ATTEMPTS 3 -> 2, backoff 0.0 -> 0.05, jitter off -> on, and jitter
+    is now actually applied in client.py. It was previously read only by the
+    capacity model and the ops console.
+  - MAX_CONNECTIONS 512 -> 256, reverting 087e524, which shipped in the same
+    rollout and removed the only backpressure the gateway had.
+  - _ResponseCache now prunes expired entries and is bounded by entry count.
+    It had no eviction path at all, which is the unbounded growth TESS-2287
+    was chasing -- setting the TTL to 0 did not reclaim anything.
+
+Left deliberately alone: CIRCUIT_BREAKER_ENABLED stays False and is now
+documented as unimplemented in client.py, so nobody mitigates by flipping a
+flag that only changes the dashboard.
+
+The capacity model against the fixed config returns the observed pre-incident
+steady state on every axis: 96.2 rps, 77% hit rate, p99 0.54s, 100% success.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ ops/runbooks/risk-gateway.md                  |  68 ++++-
+ ops/slo.yaml                                  |  10 +
+ services/console/tests/conftest.py            |  30 ++-
+ services/console/tests/test_health.py         |  14 +-
+ services/risk_gateway/client.py               |  64 ++++-
+ services/risk_gateway/config.py               |  39 ++-
+ .../tests/test_inc_4412_regression.py         | 235 ++++++++++++++++++
+ 7 files changed, 437 insertions(+), 23 deletions(-)
+ create mode 100644 services/risk_gateway/tests/test_inc_4412_regression.py
+
+diff --git a/ops/runbooks/risk-gateway.md b/ops/runbooks/risk-gateway.md
+index 26fe7d1..bf6f3e4 100644
+--- a/ops/runbooks/risk-gateway.md
++++ b/ops/runbooks/risk-gateway.md
+@@ -51,12 +51,72 @@ If `utilization` is above 1.0 and `attempts` is above 2, you are in it.
+ 3. **Roll back** the deploy that lines up, if one does.
+ 4. Only then look at the fraud model service itself.
+ 
++## A deploy record names a revision, not a payload
++
++Learned in INC-4412, and the thing most likely to cost you twenty minutes.
++
++`deploys.txt` records the revision a rollout landed on. That rollout carries
++**every commit not yet deployed**, which is usually more than one. In INC-4412
++the record said `4b56e1d`, and `git show 4b56e1d` is a single docstring line —
++so the deploy looked innocent. The change that caused the incident was
++`b745a5a`, two commits earlier in the same rollout.
++
++Correlate against the range, never the named revision:
++
++```bash
++git log --oneline <last-deployed-revision>..<revision-in-deploys.txt>
++```
++
++Read every diff in that range, and sort by blast radius rather than by commit
++message. A `perf:` one-liner in `config.py` outranks a `feat:` in a handler.
++
++## The cache is capacity, not an optimisation
++
++`CACHE_TTL_SECONDS` in `services/risk_gateway/config.py` absorbs ~77% of
++scoring calls. The `capacity_rps: 155` in `ops/slo.yaml` is demand measured
++*after* that cache; unique demand is ~420 rps. So losing the cache is not a
++latency regression, it is an instant 2.7x overload — before retries.
++
++Nothing in the shape of the metrics will tell you the cache was *turned off*
++rather than getting *less effective*: dashboard smoothing renders an
++instantaneous step to zero as a smooth ten-minute decay. Check the config, not
++the curve.
++
++## Reading the traces
++
++Per-attempt span duration is not the dependency being slow. Split it:
++
++- `queue.wait_ms` high, `duration_ms - queue.wait_ms` ≈ 45ms → the model is
++  **queued**, not slow. You have an offered-load problem, and the fix is on
++  our side.
++- Service time itself elevated → now it is worth looking at the fraud model.
++
++In INC-4412 every attempt was ~2120ms of which ~2080ms was queue wait. The
++dependency was healthy throughout and was a victim of our retry volume.
++
+ ## Known gaps
+ 
+-The call policy in `services/risk_gateway/config.py` has come up in review
+-before and has not been revisited. If you are investigating amplification,
+-read it against the reliability rules in `CLAUDE.md` — timeouts, backoff and
+-jitter, and what fails open versus closed.
++- **The circuit breaker does not exist.** `CIRCUIT_BREAKER_ENABLED` in
++  `config.py` is read by `simulation.py` and the ops console **but not by
++  `client.py`**. Turning it on during an incident will make the health tile
++  and the capacity model go green and change nothing about production. Do not
++  reach for it as a mitigation. Implementing it is tracked in the INC-4412
++  postmortem.
++- **`MAX_CONNECTIONS` is not load shedding.** At 45ms service time the
++  dependency saturates around 7 concurrent calls; the pool limit is two orders
++  of magnitude above that. Raising it to stop pool-wait warnings removes a
++  bound without adding capacity — pool-wait warnings mean the dependency is
++  near saturation, so treat them as a demand signal, not a pool-sizing one.
++- **A failed authorization is not idempotent.** `services/payments_api/service.py`
++  does not persist a result against the idempotency key when the fraud model
++  is unavailable, so merchant retries re-enter the amplifier at full cost.
++  Tracked in the INC-4412 postmortem.
++
++If you are investigating amplification, read `config.py` against the
++reliability rules in `CLAUDE.md` — timeouts, backoff and jitter, and what
++fails open versus closed. `services/risk_gateway/tests/test_inc_4412_regression.py`
++now asserts the shipped config survives; if that suite is red, the config in
++the working tree would page someone.
+ 
+ ## Escalation
+ 
+diff --git a/ops/slo.yaml b/ops/slo.yaml
+index a57b6d2..ac224c3 100644
+--- a/ops/slo.yaml
++++ b/ops/slo.yaml
+@@ -43,6 +43,16 @@ dependencies:
+     criticality: tier-1
+     failure_mode: fail-closed
+     capacity_rps: 155
++    depends_on_cache_hit_rate: 0.77
+     notes: >
+       Capacity was provisioned against observed steady-state demand with
+       headroom. Last reviewed 2026-02; authorization volume has grown since.
++
++      That 155 rps is demand measured AFTER the risk-gateway response cache.
++      Unique authorization demand is ~420 rps, so the cache is supplying about
++      73% of this dependency's effective capacity. CACHE_TTL_SECONDS in
++      services/risk_gateway/config.py is therefore a capacity control, not a
++      tuning knob: at a 0% hit rate the offered load is ~2.7x capacity before
++      a single retry. This was not written down before INC-4412, and its
++      absence is why the change that caused it read as "neutral for the auth
++      path" in review.
+diff --git a/services/console/tests/conftest.py b/services/console/tests/conftest.py
+index c562a4d..1519733 100644
+--- a/services/console/tests/conftest.py
++++ b/services/console/tests/conftest.py
+@@ -34,7 +34,6 @@ def git(repo: Path, *args: str) -> str:
+ 
+ 
+ COPY = [
+-    "services/risk_gateway/config.py",
+     "ops/incidents/INC-4412",
+     "ops/slo.yaml",
+     ".claude/settings.json",
+@@ -42,6 +41,32 @@ COPY = [
+     ".github/workflows",
+ ]
+ 
++# The risk-gateway config as it stood at 14:02 UTC on 2026-09-17, pinned rather
++# than copied out of the working tree. The console's whole premise is that a
++# triage run edits this file on a branch in the same checkout, so a fixture that
++# read the live file would stop representing the incident the moment anyone
++# fixed it -- which is what happened in INC-4412's own remediation.
++SEEDED_CONFIG = '''"""Risk gateway tuning. Values here are on the synchronous authorization path."""
++
++# Fraud model response cache. Scoring the same card+amount repeatedly within a
++# short window produces the same decision, so caching absorbs most of the load.
++CACHE_TTL_SECONDS = 0
++
++# Upstream call behaviour.
++REQUEST_TIMEOUT_SECONDS = None
++RETRY_ATTEMPTS = 3
++RETRY_BACKOFF_BASE_SECONDS = 0.0
++RETRY_JITTER = False
++
++# Connection pool to the fraud model service.
++MAX_CONNECTIONS = 512
++
++# Circuit breaker. Disabled -- never got prioritised.
++CIRCUIT_BREAKER_ENABLED = False
++CIRCUIT_BREAKER_ERROR_THRESHOLD = 0.5
++CIRCUIT_BREAKER_RESET_SECONDS = 30
++'''
++
+ 
+ @pytest.fixture
+ def demo_repo(tmp_path: Path) -> Path:
+@@ -53,6 +78,9 @@ def demo_repo(tmp_path: Path) -> Path:
+             shutil.copytree(src, dst)
+         else:
+             shutil.copy2(src, dst)
++    seeded = repo / "services/risk_gateway/config.py"
++    seeded.parent.mkdir(parents=True, exist_ok=True)
++    seeded.write_text(SEEDED_CONFIG)
+     (repo / "README.md").write_text("Tessera demo fixture\n")
+     (repo / ".gitignore").write_text(".tessera/\n__pycache__/\n")
+     git(repo, "init", "-q", "-b", "main")
+diff --git a/services/console/tests/test_health.py b/services/console/tests/test_health.py
+index d488444..80d7bc7 100644
+--- a/services/console/tests/test_health.py
++++ b/services/console/tests/test_health.py
+@@ -2,8 +2,8 @@ from pathlib import Path
+ 
+ from services.console.bus import EventBus
+ from services.console.gitops import Git
+-from services.console.health import HealthMonitor, assess, parse_config, snapshot
+-from services.console.tests.conftest import REAL_REPO, git
++from services.console.health import CONFIG_KEYS, HealthMonitor, assess, parse_config, snapshot
++from services.console.tests.conftest import REAL_REPO, SEEDED_CONFIG, git
+ 
+ FIXED = {
+     "CACHE_TTL_SECONDS": 300, "REQUEST_TIMEOUT_SECONDS": 1.0, "RETRY_ATTEMPTS": 2,
+@@ -19,15 +19,21 @@ def write_fixed_config(repo: Path) -> None:
+ 
+ 
+ def test_parse_config_reads_the_seeded_constants_without_importing():
+-    config = parse_config((REAL_REPO / "services/risk_gateway/config.py").read_text())
++    config = parse_config(SEEDED_CONFIG)
+     assert config["CACHE_TTL_SECONDS"] == 0
+     assert config["REQUEST_TIMEOUT_SECONDS"] is None
+     assert config["CIRCUIT_BREAKER_ENABLED"] is False
+     assert config["MAX_CONNECTIONS"] == 512
+ 
+ 
++def test_parse_config_reads_the_live_file_without_importing():
++    """The parser has to keep working against whatever config.py currently is."""
++    config = parse_config((REAL_REPO / "services/risk_gateway/config.py").read_text())
++    assert set(config) >= set(CONFIG_KEYS[:7])
++
++
+ def test_assess_seeded_is_degraded_and_fixed_is_healthy():
+-    seeded = assess(parse_config((REAL_REPO / "services/risk_gateway/config.py").read_text()))
++    seeded = assess(parse_config(SEEDED_CONFIG))
+     assert seeded["verdict"] == "degraded"
+     assert seeded["result"]["utilization"] > 7
+     fixed = assess(FIXED)
+diff --git a/services/risk_gateway/client.py b/services/risk_gateway/client.py
+index dcd438b..3e164a1 100644
+--- a/services/risk_gateway/client.py
++++ b/services/risk_gateway/client.py
+@@ -14,6 +14,7 @@ attack from your chargeback report.
+ from __future__ import annotations
+ 
+ import logging
++import random
+ import time
+ from enum import StrEnum
+ 
+@@ -33,28 +34,72 @@ class FraudModelUnavailable(Exception):
+ 
+ 
+ class _ResponseCache:
+-    def __init__(self, ttl_seconds: float) -> None:
++    """
++    TTL cache with a bounded entry count.
++
++    Both bounds matter. The TTL is what keeps offered load off the fraud model;
++    the entry cap is what keeps the pod's resident set flat. Before INC-4412
++    this class had neither an entry cap nor any pruning of expired entries --
++    `get` treated them as misses but `put` kept writing, so the dict only ever
++    grew. That is the memory growth TESS-2287 was chasing, and it is why
++    setting the TTL to zero did not actually reclaim anything.
++    """
++
++    def __init__(self, ttl_seconds: float, max_entries: int | None = None) -> None:
+         self.ttl = ttl_seconds
++        self.max_entries = config.CACHE_MAX_ENTRIES if max_entries is None else max_entries
+         self._entries: dict[str, tuple[float, RiskDecision]] = {}
+         self.hits = 0
+         self.misses = 0
++        self.evictions = 0
++
++    def __len__(self) -> int:
++        return len(self._entries)
+ 
+     def get(self, key: str) -> RiskDecision | None:
+         entry = self._entries.get(key)
+-        if entry is None or (time.monotonic() - entry[0]) > self.ttl:
++        if entry is None:
++            self.misses += 1
++            return None
++        if (time.monotonic() - entry[0]) > self.ttl:
++            # Drop it rather than leaving it to accumulate.
++            del self._entries[key]
+             self.misses += 1
+             return None
+         self.hits += 1
+         return entry[1]
+ 
+     def put(self, key: str, decision: RiskDecision) -> None:
++        if self.max_entries <= 0:
++            return
++        # Re-insert so dict order tracks recency of write, oldest first.
++        self._entries.pop(key, None)
+         self._entries[key] = (time.monotonic(), decision)
++        while len(self._entries) > self.max_entries:
++            del self._entries[next(iter(self._entries))]
++            self.evictions += 1
+ 
+ 
+ def _default_transport(payload: dict, timeout: float | None) -> RiskDecision:
+     raise FraudModelUnavailable("no transport configured; inject one in tests")
+ 
+ 
++def _backoff_delay(attempt: int) -> float:
++    """
++    Exponential backoff with full jitter.
++
++    Jitter is not decoration. Without it every caller that failed at the same
++    moment retries at the same moment, which is how a dependency that is merely
++    slow gets hit by a synchronised wave and stays down. Full jitter spreads
++    the retries uniformly across the window instead of bunching them at its
++    edge. See the AWS Builders' Library article referenced in simulation.py.
++    """
++    window = config.RETRY_BACKOFF_BASE_SECONDS * (2**attempt)
++    if window <= 0:
++        return 0.0
++    return random.uniform(0.0, window) if config.RETRY_JITTER else window
++
++
+ class FraudClient:
+     """
+     Scores a transaction against the fraud model.
+@@ -63,12 +108,18 @@ class FraudClient:
+     simulation.py can drive it without a network.
+     """
+ 
+-    def __init__(self, transport=None, cache_ttl_seconds: float | None = None) -> None:
++    def __init__(
++        self,
++        transport=None,
++        cache_ttl_seconds: float | None = None,
++        cache_max_entries: int | None = None,
++    ) -> None:
+         self.transport = transport or _default_transport
+         self.max_connections = config.MAX_CONNECTIONS
+         self.in_flight = 0
+         self.cache = _ResponseCache(
+-            config.CACHE_TTL_SECONDS if cache_ttl_seconds is None else cache_ttl_seconds
++            config.CACHE_TTL_SECONDS if cache_ttl_seconds is None else cache_ttl_seconds,
++            cache_max_entries,
+         )
+         self.attempts_made = 0
+ 
+@@ -103,9 +154,8 @@ class FraudClient:
+                     "fraud_model_attempt_failed",
+                     extra={"attempt": attempt, "error": str(exc)},
+                 )
+-                # Immediate retry. No backoff, no jitter.
+-                if config.RETRY_BACKOFF_BASE_SECONDS:
+-                    time.sleep(config.RETRY_BACKOFF_BASE_SECONDS * (2**attempt))
++                if attempt < config.RETRY_ATTEMPTS:
++                    time.sleep(_backoff_delay(attempt))
+             finally:
+                 self.in_flight = max(0, self.in_flight - 1)
+ 
+diff --git a/services/risk_gateway/config.py b/services/risk_gateway/config.py
+index a7734b5..b9182d6 100644
+--- a/services/risk_gateway/config.py
++++ b/services/risk_gateway/config.py
+@@ -2,18 +2,43 @@
+ 
+ # Fraud model response cache. Scoring the same card+amount repeatedly within a
+ # short window produces the same decision, so caching absorbs most of the load.
+-CACHE_TTL_SECONDS = 0
++#
++# This is load-bearing, not an optimisation. At a ~77% hit rate the fraud model
++# sees ~96 rps against a capacity of ~155 rps. At a 0% hit rate it sees ~420 rps
++# before retries, which is 2.7x capacity -- see INC-4412. Do not lower this
++# without running `python -m services.risk_gateway.simulation` first.
++CACHE_TTL_SECONDS = 300
++
++# Bound the cache by entry count rather than by disabling it. Entries are also
++# pruned once expired; the two together are what keep the pod's resident set
++# flat (TESS-2287). Sized to cover a 5-minute window of distinct card+amount
++# pairs at peak with room to spare.
++CACHE_MAX_ENTRIES = 50_000
+ 
+ # Upstream call behaviour.
+-REQUEST_TIMEOUT_SECONDS = None
+-RETRY_ATTEMPTS = 3
+-RETRY_BACKOFF_BASE_SECONDS = 0.0
+-RETRY_JITTER = False
++#
++# The edge gives the whole authorization 8.5s. A per-attempt timeout well inside
++# that is what bounds the tail: without one, a single attempt can consume the
++# entire budget and the caller gives up rather than the call doing so.
++REQUEST_TIMEOUT_SECONDS = 1.0
++RETRY_ATTEMPTS = 2
++RETRY_BACKOFF_BASE_SECONDS = 0.05
++RETRY_JITTER = True
+ 
+ # Connection pool to the fraud model service.
+-MAX_CONNECTIONS = 512
++#
++# NOTE: at 45ms service time the dependency saturates at ~7 concurrent calls, so
++# this limit is not meaningful backpressure at any value near it. It is a
++# resource bound, not a load shedder. Sizing it against dependency capacity is
++# tracked as follow-up work in the INC-4412 postmortem.
++MAX_CONNECTIONS = 256
+ 
+-# Circuit breaker. Disabled -- never got prioritised.
++# Circuit breaker.
++#
++# WARNING: this flag is NOT implemented in client.py -- only simulation.py and
++# the ops console read it. Turning it on makes the capacity model and the health
++# tile report a breaker that does not exist in the request path. Leave it False
++# until the breaker is actually built; see the INC-4412 postmortem.
+ CIRCUIT_BREAKER_ENABLED = False
+ CIRCUIT_BREAKER_ERROR_THRESHOLD = 0.5
+ CIRCUIT_BREAKER_RESET_SECONDS = 30
+diff --git a/services/risk_gateway/tests/test_inc_4412_regression.py b/services/risk_gateway/tests/test_inc_4412_regression.py
+new file mode 100644
+index 0000000..73da0ce
+--- /dev/null
++++ b/services/risk_gateway/tests/test_inc_4412_regression.py
+@@ -0,0 +1,235 @@
++"""
++Regression tests for INC-4412.
++
++On 2026-09-17 a one-line change set `CACHE_TTL_SECONDS` to 0. The fraud-model
++response cache was absorbing ~77% of scoring calls, so removing it multiplied
++offered load on a tier-1 synchronous dependency by ~4.4x in the time it took
++one deploy to roll. Retries without backoff turned that into a metastable
++overload that did not recover on its own: ~41,300 authorizations were declined
++by the fail-closed path across 2,184 merchants.
++
++Nothing in the suite objected, because the capacity model was only ever run
++against hand-written configs in `test_capacity.py` -- never against the values
++the service actually ships with. These tests close that gap: they assert on
++`config_from_module()`, so a config change that pushes the fraud model past
++capacity fails CI rather than paging someone.
++"""
++
++from __future__ import annotations
++
++import time
++from dataclasses import replace
++
++import pytest
++
++from services.risk_gateway import config
++from services.risk_gateway.client import FraudClient, RiskDecision, _backoff_delay
++from services.risk_gateway.simulation import config_from_module, simulate
++
++# Observed in ops/incidents/INC-4412/. alert.json recorded success_rate 0.708
++# and p99 8.47s; metrics.csv shows fraud_model_rps settling around 1100.
++INCIDENT_SUCCESS_RATE = 0.708
++
++
++# --------------------------------------------------------------------------
++# The live config must not saturate the dependency. This is the regression.
++# --------------------------------------------------------------------------
++
++def test_live_config_does_not_saturate_the_fraud_model():
++    """
++    The shipped config, run through the capacity model, must leave headroom.
++
++    This is the assertion that was missing on 2026-09-17. With
++    CACHE_TTL_SECONDS = 0 it fails: utilization 7.22, success rate 70.8%.
++    """
++    result = simulate(config_from_module())
++    assert not result.saturated, result.summary()
++    assert result.utilization < 1.0, result.summary()
++
++
++def test_live_config_meets_the_fraud_model_slo():
++    """ops/slo.yaml: success >= 99.5%, p99 <= 1.0s on the auth path."""
++    result = simulate(config_from_module())
++    assert result.success_rate >= 0.995, result.summary()
++    assert result.p99_latency_seconds <= 1.0, result.summary()
++
++
++def test_live_config_does_not_amplify_its_own_load():
++    """
++    Retries must be a rounding error in steady state, not a multiplier.
++
++    During the incident this was 2.67 attempts per call, which is what took a
++    2.7x overload to 7.2x and made the bad state stable.
++    """
++    result = simulate(config_from_module())
++    assert result.mean_attempts_per_call < 1.05, result.summary()
++
++
++def test_live_config_keeps_the_cache_load_bearing():
++    """
++    The cache is capacity, not an optimisation.
++
++    Without it the fraud model sees the full authorization rate. Pin a hit rate
++    that actually absorbs load so that halving the TTL as a "tuning" change is
++    a test failure rather than an incident.
++    """
++    result = simulate(config_from_module())
++    assert result.cache_hit_rate > 0.5, result.summary()
++
++
++# --------------------------------------------------------------------------
++# Contributing factors, each of which is a CLAUDE.md reliability rule.
++# --------------------------------------------------------------------------
++
++def test_every_outbound_attempt_has_a_timeout():
++    """
++    Reliability rule 1. The edge budget is 8.5s; with no per-attempt timeout a
++    single attempt can consume all of it, which is why the incident p99 pinned
++    at the budget rather than at anything the dependency was doing.
++    """
++    assert config.REQUEST_TIMEOUT_SECONDS is not None
++    assert 0 < config.REQUEST_TIMEOUT_SECONDS < 8.5
++
++
++def test_retries_have_backoff_and_jitter():
++    """Reliability rule 2. Naive retries amplify load exactly when it hurts."""
++    assert config.RETRY_BACKOFF_BASE_SECONDS > 0
++    assert config.RETRY_JITTER is True
++
++
++def test_backoff_is_actually_jittered_in_the_client():
++    """
++    The flag has to reach the request path.
++
++    Before this change `RETRY_JITTER` was read only by simulation.py and the
++    ops console -- the client ignored it, so the capacity model could be made
++    to look healthy by flipping a flag that changed nothing in production.
++    """
++    window = config.RETRY_BACKOFF_BASE_SECONDS * 2
++    delays = {_backoff_delay(1) for _ in range(50)}
++    assert len(delays) > 1, "jitter enabled but every delay is identical"
++    assert all(0.0 <= d <= window for d in delays)
++
++
++def test_circuit_breaker_flag_stays_off_while_it_is_unimplemented():
++    """
++    Guardrail, not a preference.
++
++    simulation.py and services/console/health.py both credit this flag, but
++    client.py has no breaker. Enabling it would turn the health tile green
++    without changing a single request. If you are here because you implemented
++    the breaker, delete this test in the same commit.
++    """
++    from services.risk_gateway import client
++
++    source = __import__("inspect").getsource(client)
++    assert "CIRCUIT_BREAKER_ENABLED" not in source, (
++        "client.py now references the breaker -- implement it, then drop this test"
++    )
++    assert config.CIRCUIT_BREAKER_ENABLED is False, (
++        "the breaker flag is credited by the capacity model but not implemented "
++        "in client.py; turning it on makes the model and the console report "
++        "protection that does not exist"
++    )
++
++
++# --------------------------------------------------------------------------
++# Characterisation: what the incident configuration actually did.
++# --------------------------------------------------------------------------
++
++def test_the_incident_configuration_reproduces_the_observed_failure():
++    """
++    The exact config that was live at 14:02 UTC, against the capacity model.
++
++    Reproducing the observed numbers is what took this from "the deploy looks
++    related" to a root cause. The deploy record named 4b56e1d, a docstring-only
++    commit; the change that mattered was b745a5a, two commits earlier in the
++    same rollout.
++    """
++    incident = replace(
++        config_from_module(),
++        cache_ttl_seconds=0,
++        retry_attempts=3,
++        backoff_base_seconds=0.0,
++        jitter=False,
++        request_timeout_seconds=None,
++    )
++    result = simulate(incident)
++
++    assert result.saturated
++    assert result.cache_hit_rate == 0.0
++    assert result.mean_attempts_per_call > 2.0, "retry amplification"
++    assert result.success_rate == pytest.approx(INCIDENT_SUCCESS_RATE, abs=0.01)
++    assert result.p99_latency_seconds == pytest.approx(8.5, abs=0.05)
++
++
++def test_the_other_knobs_do_not_rescue_a_disabled_cache():
++    """
++    Timeouts and backoff bound the blast radius; they do not replace capacity.
++
++    Worth pinning because the tempting reading of this incident is "we should
++    have had better retry policy". With the fixed retry policy and no cache the
++    dependency is still ~6x over capacity.
++    """
++    result = simulate(replace(config_from_module(), cache_ttl_seconds=0))
++    assert result.saturated
++    assert result.success_rate < 0.95
++
++
++# --------------------------------------------------------------------------
++# TESS-2287: the memory problem the incident change was trying to solve.
++# --------------------------------------------------------------------------
++
++def test_expired_entries_are_pruned_rather_than_accumulated():
++    """
++    The original bug behind the ~400MB resident set.
++
++    `get` treated expired entries as misses but never removed them and `put`
++    kept writing, so the dict only ever grew. Setting the TTL to 0 did not
++    reclaim anything -- it disabled the cache while leaving the leak in place.
++    """
++    client = FraudClient(transport=lambda p, t: RiskDecision.APPROVE, cache_ttl_seconds=0.01)
++    for n in range(20):
++        client.score(card_token=f"tok_{n}", amount_minor=1000, currency="USD")
++    assert len(client.cache) == 20
++
++    time.sleep(0.03)
++    for n in range(20):
++        client.score(card_token=f"tok_{n}", amount_minor=1000, currency="USD")
++    assert len(client.cache) == 20, "expired entries should be replaced, not stacked"
++
++
++def test_the_module_default_ttl_actually_caches():
++    """
++    The cheapest test that would have caught this.
++
++    Both existing cache tests in test_client.py construct FraudClient with an
++    explicit `cache_ttl_seconds=120`, so they kept passing while the module
++    constant that production uses was 0. This one takes the default.
++    """
++    calls = {"n": 0}
++
++    def counting(payload, timeout):
++        calls["n"] += 1
++        return RiskDecision.APPROVE
++
++    client = FraudClient(transport=counting)
++    for _ in range(10):
++        client.score(card_token="tok_same", amount_minor=1000, currency="USD")
++
++    assert calls["n"] == 1, f"repeat scoring hit the fraud model {calls['n']} times"
++    assert client.cache.hits == 9
++
++
++def test_cache_is_bounded_by_entry_count():
++    """Resident set is bounded by the cap, not by however many cards show up."""
++    client = FraudClient(
++        transport=lambda p, t: RiskDecision.APPROVE,
++        cache_ttl_seconds=300,
++        cache_max_entries=10,
++    )
++    for n in range(50):
++        client.score(card_token=f"tok_{n}", amount_minor=1000, currency="USD")
++
++    assert len(client.cache) == 10
++    assert client.cache.evictions == 40
+-- 
+2.50.1 (Apple Git-155)
+
