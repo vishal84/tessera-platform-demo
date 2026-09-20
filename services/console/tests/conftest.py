@@ -34,13 +34,38 @@ def git(repo: Path, *args: str) -> str:
 
 
 COPY = [
-    "services/risk_gateway/config.py",
     "ops/incidents/INC-4412",
     "ops/slo.yaml",
     ".claude/settings.json",
     ".claude/hooks",
     ".github/workflows",
 ]
+
+# The risk-gateway config as it stood at 14:02 UTC on 2026-09-17, pinned rather
+# than copied out of the working tree. The console's whole premise is that a
+# triage run edits this file on a branch in the same checkout, so a fixture that
+# read the live file would stop representing the incident the moment anyone
+# fixed it -- which is what happened in INC-4412's own remediation.
+SEEDED_CONFIG = '''"""Risk gateway tuning. Values here are on the synchronous authorization path."""
+
+# Fraud model response cache. Scoring the same card+amount repeatedly within a
+# short window produces the same decision, so caching absorbs most of the load.
+CACHE_TTL_SECONDS = 0
+
+# Upstream call behaviour.
+REQUEST_TIMEOUT_SECONDS = None
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_BASE_SECONDS = 0.0
+RETRY_JITTER = False
+
+# Connection pool to the fraud model service.
+MAX_CONNECTIONS = 512
+
+# Circuit breaker. Disabled -- never got prioritised.
+CIRCUIT_BREAKER_ENABLED = False
+CIRCUIT_BREAKER_ERROR_THRESHOLD = 0.5
+CIRCUIT_BREAKER_RESET_SECONDS = 30
+'''
 
 
 @pytest.fixture
@@ -53,6 +78,9 @@ def demo_repo(tmp_path: Path) -> Path:
             shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
+    seeded = repo / "services/risk_gateway/config.py"
+    seeded.parent.mkdir(parents=True, exist_ok=True)
+    seeded.write_text(SEEDED_CONFIG)
     (repo / "README.md").write_text("Tessera demo fixture\n")
     (repo / ".gitignore").write_text(".tessera/\n__pycache__/\n")
     git(repo, "init", "-q", "-b", "main")

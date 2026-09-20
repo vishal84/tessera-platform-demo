@@ -14,6 +14,7 @@ attack from your chargeback report.
 from __future__ import annotations
 
 import logging
+import random
 import time
 from enum import StrEnum
 
@@ -33,26 +34,70 @@ class FraudModelUnavailable(Exception):
 
 
 class _ResponseCache:
-    def __init__(self, ttl_seconds: float) -> None:
+    """
+    TTL cache with a bounded entry count.
+
+    Both bounds matter. The TTL is what keeps offered load off the fraud model;
+    the entry cap is what keeps the pod's resident set flat. Before INC-4412
+    this class had neither an entry cap nor any pruning of expired entries --
+    `get` treated them as misses but `put` kept writing, so the dict only ever
+    grew. That is the memory growth TESS-2287 was chasing, and it is why
+    setting the TTL to zero did not actually reclaim anything.
+    """
+
+    def __init__(self, ttl_seconds: float, max_entries: int | None = None) -> None:
         self.ttl = ttl_seconds
+        self.max_entries = config.CACHE_MAX_ENTRIES if max_entries is None else max_entries
         self._entries: dict[str, tuple[float, RiskDecision]] = {}
         self.hits = 0
         self.misses = 0
+        self.evictions = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
 
     def get(self, key: str) -> RiskDecision | None:
         entry = self._entries.get(key)
-        if entry is None or (time.monotonic() - entry[0]) > self.ttl:
+        if entry is None:
+            self.misses += 1
+            return None
+        if (time.monotonic() - entry[0]) > self.ttl:
+            # Drop it rather than leaving it to accumulate.
+            del self._entries[key]
             self.misses += 1
             return None
         self.hits += 1
         return entry[1]
 
     def put(self, key: str, decision: RiskDecision) -> None:
+        if self.max_entries <= 0:
+            return
+        # Re-insert so dict order tracks recency of write, oldest first.
+        self._entries.pop(key, None)
         self._entries[key] = (time.monotonic(), decision)
+        while len(self._entries) > self.max_entries:
+            del self._entries[next(iter(self._entries))]
+            self.evictions += 1
 
 
 def _default_transport(payload: dict, timeout: float | None) -> RiskDecision:
     raise FraudModelUnavailable("no transport configured; inject one in tests")
+
+
+def _backoff_delay(attempt: int) -> float:
+    """
+    Exponential backoff with full jitter.
+
+    Jitter is not decoration. Without it every caller that failed at the same
+    moment retries at the same moment, which is how a dependency that is merely
+    slow gets hit by a synchronised wave and stays down. Full jitter spreads
+    the retries uniformly across the window instead of bunching them at its
+    edge. See the AWS Builders' Library article referenced in simulation.py.
+    """
+    window = config.RETRY_BACKOFF_BASE_SECONDS * (2**attempt)
+    if window <= 0:
+        return 0.0
+    return random.uniform(0.0, window) if config.RETRY_JITTER else window
 
 
 class FraudClient:
@@ -63,12 +108,18 @@ class FraudClient:
     simulation.py can drive it without a network.
     """
 
-    def __init__(self, transport=None, cache_ttl_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        transport=None,
+        cache_ttl_seconds: float | None = None,
+        cache_max_entries: int | None = None,
+    ) -> None:
         self.transport = transport or _default_transport
         self.max_connections = config.MAX_CONNECTIONS
         self.in_flight = 0
         self.cache = _ResponseCache(
-            config.CACHE_TTL_SECONDS if cache_ttl_seconds is None else cache_ttl_seconds
+            config.CACHE_TTL_SECONDS if cache_ttl_seconds is None else cache_ttl_seconds,
+            cache_max_entries,
         )
         self.attempts_made = 0
 
@@ -103,9 +154,8 @@ class FraudClient:
                     "fraud_model_attempt_failed",
                     extra={"attempt": attempt, "error": str(exc)},
                 )
-                # Immediate retry. No backoff, no jitter.
-                if config.RETRY_BACKOFF_BASE_SECONDS:
-                    time.sleep(config.RETRY_BACKOFF_BASE_SECONDS * (2**attempt))
+                if attempt < config.RETRY_ATTEMPTS:
+                    time.sleep(_backoff_delay(attempt))
             finally:
                 self.in_flight = max(0, self.in_flight - 1)
 

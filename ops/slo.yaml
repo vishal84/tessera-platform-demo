@@ -43,6 +43,16 @@ dependencies:
     criticality: tier-1
     failure_mode: fail-closed
     capacity_rps: 155
+    depends_on_cache_hit_rate: 0.77
     notes: >
       Capacity was provisioned against observed steady-state demand with
       headroom. Last reviewed 2026-02; authorization volume has grown since.
+
+      That 155 rps is demand measured AFTER the risk-gateway response cache.
+      Unique authorization demand is ~420 rps, so the cache is supplying about
+      73% of this dependency's effective capacity. CACHE_TTL_SECONDS in
+      services/risk_gateway/config.py is therefore a capacity control, not a
+      tuning knob: at a 0% hit rate the offered load is ~2.7x capacity before
+      a single retry. This was not written down before INC-4412, and its
+      absence is why the change that caused it read as "neutral for the auth
+      path" in review.
