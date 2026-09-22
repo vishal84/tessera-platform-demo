@@ -3,11 +3,11 @@ name: Model validation
 # Every change to ml/ passes the same four gates before it can merge. A data
 # scientist ships through this; so does an agent.
 #
-# STATUS: the gates below are agreed and specified, but ml/validation/ is not
-# implemented yet, so this workflow currently fails on Gate 1. That is
-# deliberate -- the contract was written first, in the review where the team
-# agreed what "validated" means. Implementing the four modules to satisfy it
-# is tracked as TESS-2310.
+# The contract was written first, in the review where the team agreed what
+# "validated" means; ml/validation/ implements it (TESS-2310). Each gate is a
+# `python -m` entry point taking exactly the flags below, and
+# ml/validation/tests/ keeps the notebook-01 chargeback rate as a negative
+# fixture so Gate 1 is proven to fail on the mistake that reached shadow.
 on:
   pull_request:
     paths:
