@@ -2,8 +2,8 @@ from pathlib import Path
 
 from services.console.bus import EventBus
 from services.console.gitops import Git
-from services.console.health import HealthMonitor, assess, parse_config, snapshot
-from services.console.tests.conftest import REAL_REPO, git
+from services.console.health import CONFIG_KEYS, HealthMonitor, assess, parse_config, snapshot
+from services.console.tests.conftest import REAL_REPO, SEEDED_CONFIG, git
 
 FIXED = {
     "CACHE_TTL_SECONDS": 300, "REQUEST_TIMEOUT_SECONDS": 1.0, "RETRY_ATTEMPTS": 2,
@@ -19,15 +19,21 @@ def write_fixed_config(repo: Path) -> None:
 
 
 def test_parse_config_reads_the_seeded_constants_without_importing():
-    config = parse_config((REAL_REPO / "services/risk_gateway/config.py").read_text())
+    config = parse_config(SEEDED_CONFIG)
     assert config["CACHE_TTL_SECONDS"] == 0
     assert config["REQUEST_TIMEOUT_SECONDS"] is None
     assert config["CIRCUIT_BREAKER_ENABLED"] is False
     assert config["MAX_CONNECTIONS"] == 512
 
 
+def test_parse_config_reads_the_live_file_without_importing():
+    """The parser has to keep working against whatever config.py currently is."""
+    config = parse_config((REAL_REPO / "services/risk_gateway/config.py").read_text())
+    assert set(config) >= set(CONFIG_KEYS[:7])
+
+
 def test_assess_seeded_is_degraded_and_fixed_is_healthy():
-    seeded = assess(parse_config((REAL_REPO / "services/risk_gateway/config.py").read_text()))
+    seeded = assess(parse_config(SEEDED_CONFIG))
     assert seeded["verdict"] == "degraded"
     assert seeded["result"]["utilization"] > 7
     fixed = assess(FIXED)

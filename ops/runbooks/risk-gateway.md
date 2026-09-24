@@ -51,12 +51,72 @@ If `utilization` is above 1.0 and `attempts` is above 2, you are in it.
 3. **Roll back** the deploy that lines up, if one does.
 4. Only then look at the fraud model service itself.
 
+## A deploy record names a revision, not a payload
+
+Learned in INC-4412, and the thing most likely to cost you twenty minutes.
+
+`deploys.txt` records the revision a rollout landed on. That rollout carries
+**every commit not yet deployed**, which is usually more than one. In INC-4412
+the record said `4b56e1d`, and `git show 4b56e1d` is a single docstring line —
+so the deploy looked innocent. The change that caused the incident was
+`b745a5a`, two commits earlier in the same rollout.
+
+Correlate against the range, never the named revision:
+
+```bash
+git log --oneline <last-deployed-revision>..<revision-in-deploys.txt>
+```
+
+Read every diff in that range, and sort by blast radius rather than by commit
+message. A `perf:` one-liner in `config.py` outranks a `feat:` in a handler.
+
+## The cache is capacity, not an optimisation
+
+`CACHE_TTL_SECONDS` in `services/risk_gateway/config.py` absorbs ~77% of
+scoring calls. The `capacity_rps: 155` in `ops/slo.yaml` is demand measured
+*after* that cache; unique demand is ~420 rps. So losing the cache is not a
+latency regression, it is an instant 2.7x overload — before retries.
+
+Nothing in the shape of the metrics will tell you the cache was *turned off*
+rather than getting *less effective*: dashboard smoothing renders an
+instantaneous step to zero as a smooth ten-minute decay. Check the config, not
+the curve.
+
+## Reading the traces
+
+Per-attempt span duration is not the dependency being slow. Split it:
+
+- `queue.wait_ms` high, `duration_ms - queue.wait_ms` ≈ 45ms → the model is
+  **queued**, not slow. You have an offered-load problem, and the fix is on
+  our side.
+- Service time itself elevated → now it is worth looking at the fraud model.
+
+In INC-4412 every attempt was ~2120ms of which ~2080ms was queue wait. The
+dependency was healthy throughout and was a victim of our retry volume.
+
 ## Known gaps
 
-The call policy in `services/risk_gateway/config.py` has come up in review
-before and has not been revisited. If you are investigating amplification,
-read it against the reliability rules in `CLAUDE.md` — timeouts, backoff and
-jitter, and what fails open versus closed.
+- **The circuit breaker does not exist.** `CIRCUIT_BREAKER_ENABLED` in
+  `config.py` is read by `simulation.py` and the ops console **but not by
+  `client.py`**. Turning it on during an incident will make the health tile
+  and the capacity model go green and change nothing about production. Do not
+  reach for it as a mitigation. Implementing it is tracked in the INC-4412
+  postmortem.
+- **`MAX_CONNECTIONS` is not load shedding.** At 45ms service time the
+  dependency saturates around 7 concurrent calls; the pool limit is two orders
+  of magnitude above that. Raising it to stop pool-wait warnings removes a
+  bound without adding capacity — pool-wait warnings mean the dependency is
+  near saturation, so treat them as a demand signal, not a pool-sizing one.
+- **A failed authorization is not idempotent.** `services/payments_api/service.py`
+  does not persist a result against the idempotency key when the fraud model
+  is unavailable, so merchant retries re-enter the amplifier at full cost.
+  Tracked in the INC-4412 postmortem.
+
+If you are investigating amplification, read `config.py` against the
+reliability rules in `CLAUDE.md` — timeouts, backoff and jitter, and what
+fails open versus closed. `services/risk_gateway/tests/test_inc_4412_regression.py`
+now asserts the shipped config survives; if that suite is red, the config in
+the working tree would page someone.
 
 ## Escalation
 
